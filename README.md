@@ -31,9 +31,10 @@ framing, and ferrying events to JS. That's the payoff of the sans-IO refactor in
 
 Voice messaging works, reusing core's voice pipeline:
 
-- **Codec**: Codec2 (the pure-Rust `codec2` crate — the same one core uses — compiled to
-  wasm; no emscripten, no JS codec module). `src/codec.rs` mirrors core's `codec_param`
-  → mode mapping and i16/resample handling, so encoded audio is wire-compatible.
+- **Codec**: Codec2, **from core** — `voicetastic_core::codec::codec2_encode/decode`,
+  enabled via core's wasm-safe `codec2` feature (the pure-Rust `codec2` crate; no
+  emscripten, no JS codec module, no codec code in this crate). The codec stays a single
+  implementation in core, shared with desktop/Android.
 - **TX** (`WebClient.sendVoice`): mic PCM → Codec2 encode → core `build_message` →
   per-frame pacing via `voice::tx_policy` + firmware queue backpressure → PRIVATE_APP
   frames.

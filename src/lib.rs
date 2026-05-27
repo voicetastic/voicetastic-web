@@ -12,12 +12,11 @@
 //! (Web Serial, framing, and ferrying events to a JS callback). That's the
 //! point of the sans-IO refactor: one protocol implementation, two drivers.
 
-mod codec;
-
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use prost::Message as _;
+use voicetastic_core::codec::{codec2_decode, codec2_encode};
 use voicetastic_core::ports::PRIVATE_APP;
 use voicetastic_core::proto::ToRadio;
 use voicetastic_core::protocol::{self, InboundCtx, InboundEvent, ProtocolState};
@@ -30,7 +29,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, future_to_promise};
 
-/// Codec2 @ 1200 bps — lowest airtime, best for LoRa. (codec_param 5; see codec.rs)
+/// Codec2 @ 1200 bps — lowest airtime, best for LoRa (codec_param 5; core's codec::c2).
 const VOICE_CODEC_PARAM: u8 = 5;
 /// Codec payload bytes per wire frame. With ≤16 data chunks/message this caps a
 /// single message at ~16·128 bytes ≈ 13 s at 1200 bps (v1: one message, no FEC).
@@ -133,10 +132,11 @@ impl Inner {
     }
 
     /// Encode + frame + paced-send a voice clip. Mirrors the native voice TX
-    /// worker: Codec2 encode (codec.rs) → core `build_message` → per-frame
+    /// worker: Codec2 encode (core `codec2_encode`) → core `build_message` → per-frame
     /// pacing (`tx_policy`) + queue backpressure → PRIVATE_APP data packets.
     async fn send_voice(&self, pcm: &[f32], in_rate: u32, channel: u32, to: Option<u32>) -> Result<(), JsValue> {
-        let payload = codec::encode(pcm, in_rate, VOICE_CODEC_PARAM).map_err(|e| err(&e))?;
+        let payload =
+            codec2_encode(pcm, in_rate, VOICE_CODEC_PARAM).map_err(|e| err(&e.to_string()))?;
         let cfg = BuildConfig {
             message_id: random_message_id().map_err(|e| err(&e.to_string()))?,
             stream_seq: 0,
@@ -364,7 +364,7 @@ fn handle_voice(
                 log(&format!("voice: codec {:?} not playable in v1 (Codec2 only)", msg.codec));
                 return;
             }
-            match codec::decode(&msg.audio, msg.codec_param) {
+            match codec2_decode(&msg.audio, msg.codec_param) {
                 Ok((pcm, rate)) => {
                     let arr = js_sys::Float32Array::from(pcm.as_slice());
                     let _ = on_voice.call3(

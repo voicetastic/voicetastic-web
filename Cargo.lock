@@ -1230,6 +1230,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
+ "codec2",
  "futures",
  "getrandom 0.4.2",
  "parking_lot 0.12.5",
@@ -1249,7 +1250,6 @@ dependencies = [
 name = "voicetastic-web"
 version = "0.1.0"
 dependencies = [
- "codec2",
  "getrandom 0.4.2",
  "js-sys",
  "prost",

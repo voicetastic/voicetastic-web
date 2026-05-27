@@ -12,17 +12,14 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # Reuse the desktop engine's sans-IO protocol core: decode/build/state
-# (protocol), voice framing + reassembly (voice::build_message / VoiceAssembler)
-# and pacing (voice::tx_policy). No native transports/tokio (default-features
-# off). Path dep for now; switch to a git dep once the repo move settles.
-voicetastic-core = { path = "../voicetastic-desktop/crates/voicetastic-core", default-features = false }
+# (protocol), voice framing + reassembly (voice::build_message / VoiceAssembler),
+# pacing (voice::tx_policy), and the Codec2 codec (codec::codec2_encode/decode,
+# via the wasm-safe `codec2` feature — no Opus/C deps). No native transports/
+# tokio (default-features off). Path dep for now; switch to a git dep later.
+voicetastic-core = { path = "../voicetastic-desktop/crates/voicetastic-core", default-features = false, features = ["codec2"] }
 
 # Same prost as core (0.14) so the generated `proto` types share one trait impl.
 prost = "0.14"
-
-# Pure-Rust Codec2 (same crate core uses) — compiles to wasm32, so the voice
-# codec runs in Rust with no emscripten / JS codec module. 8 kHz mono i16.
-codec2 = "0.3"
 
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
