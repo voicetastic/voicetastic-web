@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Voicetastic Web — driver demo</title>
+    <title>Voicetastic Web — voice + text</title>
     <style>
       body {
         font-family: system-ui, sans-serif;
@@ -24,6 +24,7 @@
         cursor: pointer;
       }
       button:disabled { opacity: 0.5; cursor: default; }
+      button.rec { background: #ffb4a8; }
       input {
         font-size: 1rem;
         padding: 0.55rem 0.7rem;
@@ -33,7 +34,7 @@
         color: #fff;
         flex: 1;
       }
-      .row { display: flex; gap: 0.5rem; margin-top: 1rem; align-items: center; }
+      .row { display: flex; gap: 0.5rem; margin-top: 1rem; align-items: center; flex-wrap: wrap; }
       #log {
         margin-top: 1.5rem;
         padding: 1rem;
@@ -50,20 +51,24 @@
     </style>
   </head>
   <body>
-    <h1>Voicetastic Web — driver demo</h1>
+    <h1>Voicetastic Web — voice + text</h1>
     <p class="muted">
-      Plug in a Meshtastic radio over USB and click Connect. The page runs
-      <code>voicetastic-core</code>'s actual protocol core (decode +
-      <code>ProtocolState</code> + builders) over Web Serial — the same logic
-      the desktop and Android clients use. Each decoded event is logged below.
-      Requires Chrome/Edge or Firefox 151+ over localhost/HTTPS.
+      Plug in a Meshtastic radio over USB and Connect. Text and voice both run
+      <code>voicetastic-core</code>'s protocol core in the browser — Codec2 (pure
+      Rust) for voice, decoded and played back here. Chrome/Edge or Firefox 151+
+      over localhost/HTTPS; voice also needs mic permission.
     </p>
 
     <button id="connect">Connect</button>
 
     <div class="row">
       <input id="text" type="text" placeholder="broadcast a text message…" disabled />
-      <button id="send" disabled>Send</button>
+      <button id="send" disabled>Send text</button>
+    </div>
+
+    <div class="row">
+      <button id="record" disabled>🎙 Record</button>
+      <span id="rectimer" class="muted"></span>
     </div>
 
     <div id="log" class="muted">Idle.</div>
@@ -75,7 +80,10 @@
       const connectBtn = document.getElementById('connect');
       const textEl = document.getElementById('text');
       const sendBtn = document.getElementById('send');
+      const recBtn = document.getElementById('record');
+      const recTimer = document.getElementById('rectimer');
       let client = null;
+      let playCtx = null;
 
       const log = (line) => {
         logEl.classList.remove('muted');
@@ -83,9 +91,76 @@
         logEl.scrollTop = logEl.scrollHeight;
       };
 
+      // ---- voice playback (called from Rust with decoded PCM) ----
+      const onVoice = (pcm, rate, from) => {
+        try {
+          if (!playCtx) playCtx = new AudioContext();
+          const buf = playCtx.createBuffer(1, pcm.length, rate); // 8 kHz; browser upsamples
+          buf.getChannelData(0).set(pcm);
+          const src = playCtx.createBufferSource();
+          src.buffer = buf;
+          src.connect(playCtx.destination);
+          src.start();
+          log(`  ▶ playing ${(pcm.length / rate).toFixed(1)}s from ${from}`);
+        } catch (e) {
+          log('playback error: ' + e);
+        }
+      };
+
+      // ---- mic capture (raw PCM via Web Audio) ----
+      let recording = null; // { stream, ctx, source, proc, silent, chunks, t0 }
+      async function startRecording() {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const ctx = new AudioContext();
+        const source = ctx.createMediaStreamSource(stream);
+        // ScriptProcessor is the simplest raw-PCM tap for a demo; an
+        // AudioWorklet would be the non-deprecated production path.
+        const proc = ctx.createScriptProcessor(4096, 1, 1);
+        const silent = ctx.createGain();
+        silent.gain.value = 0; // route to destination silently so onaudioprocess fires without feedback
+        const chunks = [];
+        proc.onaudioprocess = (e) => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+        source.connect(proc);
+        proc.connect(silent);
+        silent.connect(ctx.destination);
+        recording = { stream, ctx, source, proc, silent, chunks, t0: performance.now() };
+        recBtn.textContent = '⏹ Stop';
+        recBtn.classList.add('rec');
+        const tick = () => {
+          if (!recording) return;
+          recTimer.textContent = ((performance.now() - recording.t0) / 1000).toFixed(1) + 's';
+          requestAnimationFrame(tick);
+        };
+        tick();
+      }
+
+      async function stopRecording() {
+        const r = recording;
+        recording = null;
+        recBtn.textContent = '🎙 Record';
+        recBtn.classList.remove('rec');
+        recTimer.textContent = '';
+        r.proc.disconnect();
+        r.source.disconnect();
+        r.silent.disconnect();
+        r.stream.getTracks().forEach((t) => t.stop());
+        const rate = r.ctx.sampleRate;
+        await r.ctx.close();
+        const total = r.chunks.reduce((n, a) => n + a.length, 0);
+        if (total === 0) { log('recording empty'); return; }
+        const pcm = new Float32Array(total);
+        let o = 0;
+        for (const a of r.chunks) { pcm.set(a, o); o += a.length; }
+        log(`  ⟶ encoding + sending ${(total / rate).toFixed(1)}s of audio…`);
+        try {
+          await client.sendVoice(pcm, rate, 0, undefined); // channel 0, broadcast
+        } catch (e) {
+          log('❌ voice send failed: ' + e);
+        }
+      }
+
       if (!('serial' in navigator)) {
-        logEl.textContent =
-          'Web Serial unavailable. Use Chrome/Edge or Firefox 151+ over localhost/HTTPS.';
+        logEl.textContent = 'Web Serial unavailable. Use Chrome/Edge or Firefox 151+ over localhost/HTTPS.';
         connectBtn.disabled = true;
       } else {
         await init();
@@ -95,10 +170,11 @@
           connectBtn.disabled = true;
           log('Requesting port…');
           try {
-            client = await connect((event) => log('  ⟵ ' + event));
+            client = await connect((e) => log('  ⟵ ' + e), onVoice);
             log('Connected. Config handshake in flight…');
             textEl.disabled = false;
             sendBtn.disabled = false;
+            recBtn.disabled = false;
           } catch (e) {
             log('❌ ' + e);
             connectBtn.disabled = false;
@@ -109,7 +185,7 @@
           const text = textEl.value.trim();
           if (!text || !client) return;
           try {
-            await client.sendText(text, 0, undefined); // channel 0, broadcast
+            await client.sendText(text, 0, undefined);
             log('  ⟶ sent: ' + text);
             textEl.value = '';
           } catch (e) {
@@ -117,9 +193,19 @@
           }
         };
         sendBtn.onclick = doSend;
-        textEl.addEventListener('keydown', (e) => {
-          if (e.key === 'Enter') doSend();
-        });
+        textEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSend(); });
+
+        recBtn.onclick = async () => {
+          try {
+            if (recording) await stopRecording();
+            else await startRecording();
+          } catch (e) {
+            log('❌ mic error: ' + e);
+            recording = null;
+            recBtn.textContent = '🎙 Record';
+            recBtn.classList.remove('rec');
+          }
+        };
       }
     </script>
   </body>

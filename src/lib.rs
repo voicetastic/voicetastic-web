@@ -12,15 +12,33 @@
 //! (Web Serial, framing, and ferrying events to a JS callback). That's the
 //! point of the sans-IO refactor: one protocol implementation, two drivers.
 
+mod codec;
+
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use prost::Message as _;
+use voicetastic_core::ports::PRIVATE_APP;
 use voicetastic_core::proto::ToRadio;
 use voicetastic_core::protocol::{self, InboundCtx, InboundEvent, ProtocolState};
+use voicetastic_core::service::modem_preset_from_proto;
+use voicetastic_core::voice::{
+    AssemblerConfig, AssemblyEvent, BuildConfig, VoiceAssembler, VoiceCodec, build_message,
+    random_message_id, tx_policy,
+};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, future_to_promise};
+
+/// Codec2 @ 1200 bps — lowest airtime, best for LoRa. (codec_param 5; see codec.rs)
+const VOICE_CODEC_PARAM: u8 = 5;
+/// Codec payload bytes per wire frame. With ≤16 data chunks/message this caps a
+/// single message at ~16·128 bytes ≈ 13 s at 1200 bps (v1: one message, no FEC).
+const VOICE_CHUNK_SIZE: usize = 128;
+/// No Reed-Solomon parity in v1 (FEC/NACK retransmit stay native-only for now).
+const VOICE_PARITY: u8 = 0;
+/// Inter-frame pacing fallback before the radio's LoRa config is known.
+const DEFAULT_PACING_MS: u64 = 250;
 
 /// Magic bytes that begin every serial-framed packet (see core's serial.rs).
 const START1: u8 = 0x94;
@@ -56,6 +74,11 @@ struct Inner {
     /// Outbound packet-id counter (the runtime-owned bit the core leaves to the
     /// driver). Seeded from the RNG like the native service.
     next_id: Cell<u32>,
+    /// RX-side voice reassembly — core's sans-IO `VoiceAssembler`.
+    assembler: VoiceAssembler,
+    /// Latest firmware queue depth (from `QueueStatus`); gates voice TX so we
+    /// don't overflow the radio. `u32::MAX` until the first report.
+    queue_free: Cell<u32>,
 }
 
 impl Inner {
@@ -93,6 +116,66 @@ impl Inner {
         log(&format!("sent text id={id}"));
         Ok(())
     }
+
+    /// Inter-frame pacing from the radio's LoRa modem preset (core's policy);
+    /// falls back to a safe default before the config burst lands.
+    fn pacing(&self) -> std::time::Duration {
+        let preset = self
+            .state
+            .borrow()
+            .lora
+            .as_ref()
+            .and_then(|l| modem_preset_from_proto(l.modem_preset));
+        match preset {
+            Some(p) => p.pacing(),
+            None => std::time::Duration::from_millis(DEFAULT_PACING_MS),
+        }
+    }
+
+    /// Encode + frame + paced-send a voice clip. Mirrors the native voice TX
+    /// worker: Codec2 encode (codec.rs) → core `build_message` → per-frame
+    /// pacing (`tx_policy`) + queue backpressure → PRIVATE_APP data packets.
+    async fn send_voice(&self, pcm: &[f32], in_rate: u32, channel: u32, to: Option<u32>) -> Result<(), JsValue> {
+        let payload = codec::encode(pcm, in_rate, VOICE_CODEC_PARAM).map_err(|e| err(&e))?;
+        let cfg = BuildConfig {
+            message_id: random_message_id().map_err(|e| err(&e.to_string()))?,
+            stream_seq: 0,
+            codec: VoiceCodec::Codec2,
+            codec_param: VOICE_CODEC_PARAM,
+            chunk_size: VOICE_CHUNK_SIZE,
+            parity_count: VOICE_PARITY,
+            last_in_stream: true,
+        };
+        let msg = build_message(&payload, &cfg).map_err(|e| err(&format!("build_message: {e}")))?;
+        let pacing = self.pacing();
+        let want_ack = to.is_some();
+        let total = msg.frames.len();
+        log(&format!("voice: sending {total} frames ({} codec bytes)", payload.len()));
+
+        let mut last: Option<f64> = None;
+        for frame in msg.frames {
+            // Pace: wait the remaining gap since the previous frame.
+            let elapsed = last.map(|t| std::time::Duration::from_secs_f64((now_ms() - t).max(0.0) / 1000.0));
+            let wait = tx_policy::pacing_delay(elapsed, pacing);
+            if !wait.is_zero() {
+                sleep_ms(wait.as_millis() as i32).await;
+            }
+            // Backpressure: don't push into a full firmware queue.
+            let bp_start = now_ms();
+            while !tx_policy::queue_has_room(self.queue_free.get()) {
+                if now_ms() - bp_start > tx_policy::RADIO_QUEUE_WAIT_TIMEOUT.as_millis() as f64 {
+                    break; // safety valve — proceed anyway
+                }
+                sleep_ms(60).await;
+            }
+            let id = self.alloc_id();
+            let pv = protocol::data_packet(id, PRIVATE_APP as i32, frame, channel, to, want_ack, false);
+            self.write_payload(pv).await?;
+            last = Some(now_ms());
+        }
+        log(&format!("voice: sent {total} frames"));
+        Ok(())
+    }
 }
 
 /// Handle to a connected radio. Returned by [`connect`]; lives as long as JS
@@ -123,6 +206,38 @@ impl WebClient {
             Ok(JsValue::UNDEFINED)
         })
     }
+
+    /// Send a voice clip: mono f32 PCM at `in_rate` Hz, encoded with Codec2 and
+    /// sent as paced PRIVATE_APP frames. `to` undefined = broadcast.
+    #[wasm_bindgen(js_name = sendVoice)]
+    pub fn send_voice(
+        &self,
+        pcm: Vec<f32>,
+        in_rate: f32,
+        channel: u32,
+        to: Option<u32>,
+    ) -> js_sys::Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            inner.send_voice(&pcm, in_rate as u32, channel, to).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+}
+
+/// Milliseconds since the epoch (monotonic enough for pacing).
+fn now_ms() -> f64 {
+    js_sys::Date::now()
+}
+
+/// Await `ms` milliseconds via `setTimeout` (no tokio on wasm).
+async fn sleep_ms(ms: i32) {
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        if let Some(win) = web_sys::window() {
+            let _ = win.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
+        }
+    });
+    let _ = JsFuture::from(promise).await;
 }
 
 /// Connect to a user-selected Meshtastic radio over Web Serial and start
@@ -132,7 +247,10 @@ impl WebClient {
 ///
 /// Must be called from a user gesture (the Web Serial port picker requires it).
 #[wasm_bindgen]
-pub async fn connect(on_event: js_sys::Function) -> Result<WebClient, JsValue> {
+pub async fn connect(
+    on_event: js_sys::Function,
+    on_voice: js_sys::Function,
+) -> Result<WebClient, JsValue> {
     let window = web_sys::window().ok_or_else(|| err("no window"))?;
     let serial = window.navigator().serial();
 
@@ -152,13 +270,14 @@ pub async fn connect(on_event: js_sys::Function) -> Result<WebClient, JsValue> {
         writer,
         state: RefCell::new(ProtocolState::default()),
         next_id: Cell::new(rand_u32()),
+        assembler: VoiceAssembler::new(AssemblerConfig::default()),
+        queue_free: Cell::new(u32::MAX),
     });
 
-    // Background inbound loop: read → deframe → core decode → core state.
+    // Background inbound loop: read → deframe → core decode → core state/voice.
     let rx = inner.clone();
-    let cb = on_event;
     wasm_bindgen_futures::spawn_local(async move {
-        if let Err(e) = read_loop(reader, rx, cb).await {
+        if let Err(e) = read_loop(reader, rx, on_event, on_voice).await {
             log(&format!("serial read loop ended: {e:?}"));
         }
     });
@@ -177,6 +296,7 @@ async fn read_loop(
     reader: web_sys::ReadableStreamDefaultReader,
     inner: Rc<Inner>,
     on_event: js_sys::Function,
+    on_voice: js_sys::Function,
 ) -> Result<(), JsValue> {
     let mut buf: Vec<u8> = Vec::new();
     loop {
@@ -208,14 +328,67 @@ async fn read_loop(
                         if ev.is_snapshot() {
                             inner.state.borrow_mut().apply(&ev);
                         }
-                        let summary = event_summary(&ev, &inner.state.borrow());
-                        let _ = on_event.call1(&JsValue::NULL, &JsValue::from_str(&summary));
+                        match &ev {
+                            // Track queue depth for voice TX backpressure.
+                            InboundEvent::QueueStatus(qs) => {
+                                inner.queue_free.set(qs.free);
+                                emit(&on_event, &format!("queue free={}", qs.free));
+                            }
+                            // Voice frames go through core's reassembler; a
+                            // completed message is decoded and handed to JS.
+                            InboundEvent::Voice(vd) => {
+                                handle_voice(&inner, vd, &on_event, &on_voice);
+                            }
+                            _ => emit(&on_event, &event_summary(&ev, &inner.state.borrow())),
+                        }
                     }
                 }
                 Err(e) => log(&format!("decode FromRadio failed: {e}")),
             }
         }
     }
+}
+
+/// Feed one voice frame to the assembler; on completion decode + play.
+fn handle_voice(
+    inner: &Rc<Inner>,
+    vd: &voicetastic_core::radio_service::VoiceData,
+    on_event: &js_sys::Function,
+    on_voice: &js_sys::Function,
+) {
+    let from = vd.from.to_string();
+    match inner.assembler.accept(&from, vd.to, vd.channel, &vd.payload) {
+        AssemblyEvent::Complete(msg) => {
+            emit(on_event, &format!("🎙️ voice complete from {from} ({} chunks)", msg.total_data));
+            if msg.codec != VoiceCodec::Codec2 {
+                log(&format!("voice: codec {:?} not playable in v1 (Codec2 only)", msg.codec));
+                return;
+            }
+            match codec::decode(&msg.audio, msg.codec_param) {
+                Ok((pcm, rate)) => {
+                    let arr = js_sys::Float32Array::from(pcm.as_slice());
+                    let _ = on_voice.call3(
+                        &JsValue::NULL,
+                        &arr,
+                        &JsValue::from_f64(rate as f64),
+                        &JsValue::from_str(&from),
+                    );
+                }
+                Err(e) => log(&format!("voice decode failed: {e}")),
+            }
+        }
+        AssemblyEvent::Pending {
+            received_data,
+            total_data,
+            ..
+        } => emit(on_event, &format!("🎙️ voice {received_data}/{total_data} from {from}")),
+        AssemblyEvent::Rejected(e) => log(&format!("voice rejected: {e}")),
+        _ => {}
+    }
+}
+
+fn emit(cb: &js_sys::Function, line: &str) {
+    let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(line));
 }
 
 /// One-line, JS-friendly description of an inbound event (for the demo UI).

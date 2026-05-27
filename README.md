@@ -27,9 +27,24 @@ No Meshtastic decode/build/state logic lives in this crate — only Web Serial, 
 framing, and ferrying events to JS. That's the payoff of the sans-IO refactor in
 `voicetastic-core` (the `protocol` module): one protocol implementation, two drivers.
 
-Not yet wired up: audio capture/playback, the Codec2 WASM codec, and voice send/receive
-(NACK retransmit stays native-only for now). Those are the remaining steps toward a full
-voice client.
+### Voice
+
+Voice messaging works, reusing core's voice pipeline:
+
+- **Codec**: Codec2 (the pure-Rust `codec2` crate — the same one core uses — compiled to
+  wasm; no emscripten, no JS codec module). `src/codec.rs` mirrors core's `codec_param`
+  → mode mapping and i16/resample handling, so encoded audio is wire-compatible.
+- **TX** (`WebClient.sendVoice`): mic PCM → Codec2 encode → core `build_message` →
+  per-frame pacing via `voice::tx_policy` + firmware queue backpressure → PRIVATE_APP
+  frames.
+- **RX**: PRIVATE_APP frames → core's sans-IO `VoiceAssembler` → on completion, Codec2
+  decode → PCM handed to the JS playback callback.
+- Mic capture + playback are Web Audio (the only JS-side audio glue); everything else is
+  core's Rust.
+
+v1 limits: one message per clip (~13 s at 1200 bps), no Reed-Solomon parity, and NACK
+retransmit stays native-only — so voice is best-effort over good links for now. Codec2
+only on the playback path.
 
 ## Build
 
