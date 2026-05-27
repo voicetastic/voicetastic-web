@@ -1,0 +1,9 @@
+/target
+/pkg
+Cargo.lock.bak
+**/*.rs.bk
+.DS_Store
+node_modules/
+# Track .cargo/config.toml (build cfg) but nothing else under .cargo/.
+.cargo/*
+!.cargo/config.toml

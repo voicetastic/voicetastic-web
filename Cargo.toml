@@ -1,0 +1,42 @@
+[package]
+name = "voicetastic-web"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "GPL-3.0-or-later"
+description = "Browser (wasm) client for Voicetastic: reuses voicetastic-core over Web Serial."
+
+[lib]
+# wasm-bindgen needs a cdylib to emit a loadable .wasm module.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Reuse the desktop engine's protocol + types. No native transports, no codecs:
+# this gate only exercises the wire framing + protobuf decode. Path dep for now;
+# switch to a git dep once voicetastic-desktop's move settles (see README).
+voicetastic-core = { path = "../voicetastic-desktop/crates/voicetastic-core", default-features = false }
+
+# Same prost as core (0.14) so the generated `proto` types share one trait impl.
+prost = "0.14"
+
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+getrandom = { version = "0.4.2", features = ["wasm_js"] }
+
+# console.log + the (still-unstable) Web Serial bindings.
+[dependencies.web-sys]
+version = "0.3"
+features = [
+  "console",
+  "Navigator",
+  "Window",
+  "Serial",
+  "SerialPort",
+  "SerialOptions",
+  "ReadableStream",
+  "ReadableStreamDefaultReader",
+  "ReadableStreamReadResult",
+  "WritableStream",
+  "WritableStreamDefaultWriter",
+]

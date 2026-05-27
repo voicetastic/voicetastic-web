@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Voicetastic Web — connectivity gate</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 40rem;
+        margin: 3rem auto;
+        padding: 0 1rem;
+        background: #100e0d;
+        color: #fff;
+      }
+      button {
+        font-size: 1rem;
+        padding: 0.7rem 1.25rem;
+        border-radius: 10px;
+        border: 1px solid #333;
+        background: #ffdfd5;
+        color: #482113;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      #status {
+        margin-top: 1.5rem;
+        padding: 1rem;
+        border: 1px solid #231f1d;
+        border-radius: 10px;
+        background: #1c1918;
+        white-space: pre-wrap;
+        font-family: ui-monospace, monospace;
+      }
+      .muted { color: #aba29f; }
+    </style>
+  </head>
+  <body>
+    <h1>Voicetastic Web — connectivity gate</h1>
+    <p class="muted">
+      Plug a Meshtastic radio in via USB, click below, and pick the serial port.
+      This sends a <code>WantConfigId</code> and waits for <code>MyNodeInfo</code>,
+      reusing <code>voicetastic-core</code>'s protobuf types compiled to WASM.
+      Requires Chrome/Edge or Firefox 151+ over <code>localhost</code> or HTTPS.
+    </p>
+    <button id="go">Connect &amp; read node info</button>
+    <div id="status" class="muted">Idle.</div>
+
+    <script type="module">
+      import init, { connect_and_read_my_node_info } from './pkg/voicetastic_web.js';
+
+      const status = document.getElementById('status');
+      const go = document.getElementById('go');
+
+      if (!('serial' in navigator)) {
+        status.textContent =
+          'Web Serial unavailable. Use Chrome/Edge or Firefox 151+ over localhost/HTTPS.';
+        go.disabled = true;
+      } else {
+        await init();
+        status.textContent = 'WASM loaded. Ready.';
+        go.onclick = async () => {
+          status.textContent = 'Requesting port…';
+          try {
+            const nodeNum = await connect_and_read_my_node_info();
+            status.textContent =
+              `✅ Connected. MyNodeInfo node_num = ${nodeNum} (0x${(nodeNum >>> 0).toString(16)})`;
+          } catch (e) {
+            status.textContent = `❌ ${e}`;
+          }
+        };
+      }
+    </script>
+  </body>
+</html>

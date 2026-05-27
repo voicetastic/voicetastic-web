@@ -1,0 +1,10 @@
+# wasm32 build flags for the browser client:
+# - getrandom_backend: select getrandom's JS-backed RNG (paired with the
+#   `wasm_js` feature; also required transitively by voicetastic-core).
+# - web_sys_unstable_apis: Web Serial is still gated behind web-sys's unstable
+#   API flag. Required until the bindings stabilise.
+[target.wasm32-unknown-unknown]
+rustflags = [
+  '--cfg', 'getrandom_backend="wasm_js"',
+  '--cfg', 'web_sys_unstable_apis',
+]
