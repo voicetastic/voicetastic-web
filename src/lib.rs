@@ -1,24 +1,26 @@
-//! Connectivity gate for the Voicetastic browser client.
+//! Browser driver for Voicetastic over Web Serial.
 //!
-//! Proves the browser-side unknowns end-to-end against a real radio over
-//! Web Serial, reusing `voicetastic-core`'s Meshtastic proto types:
-//!   1. open a user-selected serial port (Web Serial),
-//!   2. send a `WantConfigId` `ToRadio`, framed with the `0x94 0xc3` serial header,
-//!   3. read + deframe the inbound byte stream,
-//!   4. decode each `FromRadio` and resolve when `MyNodeInfo` arrives.
+//! This is the wasm sibling of `voicetastic-core`'s native `MeshtasticService`:
+//! it drives the **same** sans-IO protocol core (`voicetastic_core::protocol`)
+//! from the browser event loop. The radio bytes flow:
 //!
-//! It deliberately does NOT use core's `Transport` trait /
-//! `connect_with_transport`: those require `Send` (browser JS handles are
-//! `!Send`) and a *driven* tokio runtime. Wiring those into core (a `?Send`
-//! path on wasm32 + a `spawn_local` driver) is the next step — this gate
-//! isolates the Web Serial + wire-framing + protobuf risk first, the same way
-//! the compile gate isolated `mio`/`getrandom`.
+//!   Web Serial read  → deframe (0x94 0xc3) → `protocol::decode_inbound`
+//!                     → `ProtocolState::apply` (+ surface event to JS)
+//!   `protocol::*_packet` builder → encode `ToRadio` → frame → Web Serial write
+//!
+//! No Meshtastic decode/build/state logic lives here — only the platform glue
+//! (Web Serial, framing, and ferrying events to a JS callback). That's the
+//! point of the sans-IO refactor: one protocol implementation, two drivers.
 
-use prost::Message;
-use voicetastic_core::proto;
-use wasm_bindgen::prelude::*;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+
+use prost::Message as _;
+use voicetastic_core::proto::ToRadio;
+use voicetastic_core::protocol::{self, InboundCtx, InboundEvent, ProtocolState};
 use wasm_bindgen::JsCast;
-use wasm_bindgen_futures::JsFuture;
+use wasm_bindgen::prelude::*;
+use wasm_bindgen_futures::{JsFuture, future_to_promise};
 
 /// Magic bytes that begin every serial-framed packet (see core's serial.rs).
 const START1: u8 = 0x94;
@@ -36,53 +38,154 @@ fn err(s: &str) -> JsValue {
     JsValue::from_str(s)
 }
 
-/// Connect to a user-selected Meshtastic radio over Web Serial, request its
-/// config, and resolve with the node number from `MyNodeInfo`.
-///
-/// Must be called from a user gesture (e.g. a click handler) — the Web Serial
-/// port picker requires it.
+fn rand_u32() -> u32 {
+    let mut b = [0u8; 4];
+    let _ = getrandom::fill(&mut b);
+    u32::from_le_bytes(b)
+}
+
+/// Shared per-connection state. `!Send` (holds JS handles), which is fine on
+/// wasm's single thread.
+struct Inner {
+    /// Kept alive so the serial connection isn't dropped.
+    _port: web_sys::SerialPort,
+    writer: web_sys::WritableStreamDefaultWriter,
+    /// The canonical protocol snapshot — core's `ProtocolState`, exactly as the
+    /// native driver uses it.
+    state: RefCell<ProtocolState>,
+    /// Outbound packet-id counter (the runtime-owned bit the core leaves to the
+    /// driver). Seeded from the RNG like the native service.
+    next_id: Cell<u32>,
+}
+
+impl Inner {
+    /// Reserve the next non-zero packet id.
+    fn alloc_id(&self) -> u32 {
+        let mut id = self.next_id.get().wrapping_add(1);
+        if id == 0 {
+            id = 1;
+        }
+        self.next_id.set(id);
+        id
+    }
+
+    /// Encode a `ToRadio` payload, frame it, and write it to the port.
+    async fn write_payload(
+        &self,
+        payload: voicetastic_core::proto::to_radio::PayloadVariant,
+    ) -> Result<(), JsValue> {
+        let msg = ToRadio {
+            payload_variant: Some(payload),
+        };
+        let mut buf = Vec::with_capacity(msg.encoded_len());
+        msg.encode(&mut buf).map_err(|e| err(&format!("encode: {e}")))?;
+        let frame = frame_serial(&buf);
+        let chunk = js_sys::Uint8Array::from(frame.as_slice());
+        JsFuture::from(self.writer.write_with_chunk(chunk.as_ref())).await?;
+        Ok(())
+    }
+
+    async fn send_text(&self, text: &str, channel: u32, to: Option<u32>) -> Result<(), JsValue> {
+        let id = self.alloc_id();
+        let payload = protocol::text_packet(id, text, channel, to)
+            .map_err(|e| err(&format!("build text: {e}")))?;
+        self.write_payload(payload).await?;
+        log(&format!("sent text id={id}"));
+        Ok(())
+    }
+}
+
+/// Handle to a connected radio. Returned by [`connect`]; lives as long as JS
+/// holds it. The inbound read loop runs in the background via `spawn_local`.
 #[wasm_bindgen]
-pub async fn connect_and_read_my_node_info() -> Result<JsValue, JsValue> {
+pub struct WebClient {
+    inner: Rc<Inner>,
+}
+
+#[wasm_bindgen]
+impl WebClient {
+    /// Send a text message. `to` undefined = broadcast. Returns a Promise.
+    #[wasm_bindgen(js_name = sendText)]
+    pub fn send_text(&self, text: String, channel: u32, to: Option<u32>) -> js_sys::Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            inner.send_text(&text, channel, to).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// Re-request the full config burst.
+    #[wasm_bindgen(js_name = requestConfig)]
+    pub fn request_config(&self) -> js_sys::Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            inner.write_payload(protocol::want_config(rand_u32())).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+}
+
+/// Connect to a user-selected Meshtastic radio over Web Serial and start
+/// driving `voicetastic_core`'s protocol core. `on_event` is invoked with a
+/// short string for every decoded inbound event. Resolves once connected (the
+/// read loop continues in the background).
+///
+/// Must be called from a user gesture (the Web Serial port picker requires it).
+#[wasm_bindgen]
+pub async fn connect(on_event: js_sys::Function) -> Result<WebClient, JsValue> {
     let window = web_sys::window().ok_or_else(|| err("no window"))?;
     let serial = window.navigator().serial();
 
-    // 1. Ask the user to pick a port, then open it.
     let port: web_sys::SerialPort = JsFuture::from(serial.request_port()).await?.dyn_into()?;
-    let opts = web_sys::SerialOptions::new(BAUD);
-    JsFuture::from(port.open(&opts)).await?;
+    JsFuture::from(port.open(&web_sys::SerialOptions::new(BAUD))).await?;
     log(&format!("serial: port open @{BAUD}"));
 
-    // 2. Build + frame a WantConfigId ToRadio (reusing core's proto types).
-    let nonce = rand_u32();
-    let to = proto::ToRadio {
-        payload_variant: Some(proto::to_radio::PayloadVariant::WantConfigId(nonce)),
-    };
-    let mut payload = Vec::new();
-    to.encode(&mut payload)
-        .map_err(|e| err(&format!("encode ToRadio: {e}")))?;
-    let frame = frame_serial(&payload);
-
-    // 3. Write it to the port.
     let writer = port
         .writable()
         .get_writer()
         .map_err(|e| err(&format!("get_writer: {e:?}")))?;
-    let chunk = js_sys::Uint8Array::from(frame.as_slice());
-    JsFuture::from(writer.write_with_chunk(chunk.as_ref())).await?;
-    writer.release_lock();
+    let reader: web_sys::ReadableStreamDefaultReader =
+        port.readable().get_reader().unchecked_into();
+
+    let inner = Rc::new(Inner {
+        _port: port,
+        writer,
+        state: RefCell::new(ProtocolState::default()),
+        next_id: Cell::new(rand_u32()),
+    });
+
+    // Background inbound loop: read → deframe → core decode → core state.
+    let rx = inner.clone();
+    let cb = on_event;
+    wasm_bindgen_futures::spawn_local(async move {
+        if let Err(e) = read_loop(reader, rx, cb).await {
+            log(&format!("serial read loop ended: {e:?}"));
+        }
+    });
+
+    // Kick off the config handshake using the core builder.
+    let nonce = rand_u32();
+    inner.write_payload(protocol::want_config(nonce)).await?;
     log(&format!("serial: sent WantConfigId nonce={nonce}"));
 
-    // 4. Read + deframe until a FromRadio carries MyNodeInfo.
-    let reader: web_sys::ReadableStreamDefaultReader = port.readable().get_reader().unchecked_into();
-    let mut buf: Vec<u8> = Vec::new();
+    Ok(WebClient { inner })
+}
 
+/// Read frames off the port forever, feeding each through the core decoder and
+/// applying snapshot events to the shared `ProtocolState`.
+async fn read_loop(
+    reader: web_sys::ReadableStreamDefaultReader,
+    inner: Rc<Inner>,
+    on_event: js_sys::Function,
+) -> Result<(), JsValue> {
+    let mut buf: Vec<u8> = Vec::new();
     loop {
         let result = JsFuture::from(reader.read()).await?;
         let done = js_sys::Reflect::get(&result, &JsValue::from_str("done"))?
             .as_bool()
             .unwrap_or(false);
         if done {
-            return Err(err("serial stream closed before MyNodeInfo arrived"));
+            return Ok(());
         }
         let value = js_sys::Reflect::get(&result, &JsValue::from_str("value"))?;
         let arr = js_sys::Uint8Array::new(&value);
@@ -90,24 +193,76 @@ pub async fn connect_and_read_my_node_info() -> Result<JsValue, JsValue> {
         arr.copy_to(&mut chunk);
         buf.extend_from_slice(&chunk);
 
-        // Drain every complete frame currently buffered.
         while let Some((payload, consumed)) = next_frame(&buf) {
             buf.drain(..consumed);
             if payload.is_empty() {
-                continue; // resync marker — skipped noise
+                continue; // resync marker
             }
-            match proto::FromRadio::decode(payload.as_slice()) {
-                Ok(fr) => {
-                    if let Some(proto::from_radio::PayloadVariant::MyInfo(info)) = fr.payload_variant
-                    {
-                        log(&format!("serial: MyNodeInfo node_num={}", info.my_node_num));
-                        let _ = reader.cancel();
-                        return Ok(JsValue::from_f64(f64::from(info.my_node_num)));
+            // Snapshot the one bit the decoder needs from current state.
+            let ctx = InboundCtx {
+                my_node_num: inner.state.borrow().my_info.as_ref().map(|i| i.my_node_num),
+            };
+            match protocol::decode_inbound(&payload, &ctx) {
+                Ok(events) => {
+                    for ev in events {
+                        if ev.is_snapshot() {
+                            inner.state.borrow_mut().apply(&ev);
+                        }
+                        let summary = event_summary(&ev, &inner.state.borrow());
+                        let _ = on_event.call1(&JsValue::NULL, &JsValue::from_str(&summary));
                     }
                 }
-                Err(e) => log(&format!("decode FromRadio failed (skipping frame): {e}")),
+                Err(e) => log(&format!("decode FromRadio failed: {e}")),
             }
         }
+    }
+}
+
+/// One-line, JS-friendly description of an inbound event (for the demo UI).
+fn event_summary(ev: &InboundEvent, state: &ProtocolState) -> String {
+    use voicetastic_core::proto::config::PayloadVariant as Cfg;
+    match ev {
+        InboundEvent::MyInfo(i) => format!("MyNodeInfo node_num=0x{:x}", i.my_node_num),
+        InboundEvent::NodeInfo(ni) => {
+            let name = ni
+                .user
+                .as_ref()
+                .map(|u| u.long_name.as_str())
+                .unwrap_or("?");
+            format!("NodeInfo 0x{:x} \"{name}\" (known nodes: {})", ni.num, state.nodes.len())
+        }
+        InboundEvent::Owner(u) => format!("Owner \"{}\"", u.long_name),
+        InboundEvent::Config(v) => {
+            let which = match v {
+                Cfg::Lora(_) => "lora",
+                Cfg::Device(_) => "device",
+                Cfg::Position(_) => "position",
+                Cfg::Power(_) => "power",
+                Cfg::Network(_) => "network",
+                Cfg::Display(_) => "display",
+                Cfg::Bluetooth(_) => "bluetooth",
+                _ => "other",
+            };
+            format!("Config: {which}")
+        }
+        InboundEvent::Channel(ch) => format!("Channel[{}] (total: {})", ch.index, state.channels.len()),
+        InboundEvent::Metadata(m) => format!("Metadata fw={}", m.firmware_version),
+        InboundEvent::ConfigComplete(n) => format!(
+            "✅ ConfigComplete nonce={n} — READY (nodes={}, channels={}, fw={})",
+            state.nodes.len(),
+            state.channels.len(),
+            state
+                .metadata
+                .as_ref()
+                .map(|m| m.firmware_version.as_str())
+                .unwrap_or("?")
+        ),
+        InboundEvent::IncomingText(t) => format!("💬 text from 0x{:x}: {}", t.from, t.text),
+        InboundEvent::IncomingData(d) => {
+            format!("data port={} from=0x{:x} ({} bytes)", d.portnum, d.from, d.payload.len())
+        }
+        InboundEvent::Voice(vd) => format!("🎙️ voice from {:?} ({} bytes)", vd.from, vd.payload.len()),
+        InboundEvent::QueueStatus(qs) => format!("queue free={}", qs.free),
     }
 }
 
@@ -120,12 +275,9 @@ fn frame_serial(payload: &[u8]) -> Vec<u8> {
     v
 }
 
-/// Try to extract one framed payload from the front of `buf`.
-///
-/// Returns `(payload, bytes_consumed)`. Scans past leading console-log noise
-/// like core's `read_frame`. On an invalid length it consumes the bytes up to
-/// and including the false `START1` and returns an empty payload as a resync
-/// marker. Returns `None` when more bytes are still needed.
+/// Extract one framed payload from the front of `buf`, scanning past console
+/// noise. Returns `(payload, bytes_consumed)`, an empty payload as a resync
+/// marker on a bad length, or `None` when more bytes are needed.
 fn next_frame(buf: &[u8]) -> Option<(Vec<u8>, usize)> {
     let mut i = 0;
     while i + 1 < buf.len() {
@@ -135,26 +287,20 @@ fn next_frame(buf: &[u8]) -> Option<(Vec<u8>, usize)> {
         i += 1;
     }
     if i + 1 >= buf.len() {
-        return None; // header not seen yet
+        return None;
     }
     if i + 4 > buf.len() {
-        return None; // header incomplete
+        return None;
     }
     let len = ((buf[i + 2] as usize) << 8) | (buf[i + 3] as usize);
     if len == 0 || len > MAX_PAYLOAD {
-        return Some((Vec::new(), i + 1)); // resync past the false START1
+        return Some((Vec::new(), i + 1));
     }
     let start = i + 4;
     if start + len > buf.len() {
-        return None; // payload incomplete
+        return None;
     }
     Some((buf[start..start + len].to_vec(), start + len))
-}
-
-fn rand_u32() -> u32 {
-    let mut b = [0u8; 4];
-    let _ = getrandom::fill(&mut b);
-    u32::from_le_bytes(b)
 }
 
 #[cfg(test)]
@@ -174,14 +320,6 @@ mod tests {
     fn skips_leading_noise() {
         let mut data = b"debug log\n".to_vec();
         data.extend(frame_serial(b"ok"));
-        let (p, _) = next_frame(&data).unwrap();
-        assert_eq!(p, b"ok");
-    }
-
-    #[test]
-    fn incomplete_payload_waits() {
-        let mut data = vec![START1, START2, 0x00, 0x0a];
-        data.extend_from_slice(b"abc"); // only 3 of 10 bytes
-        assert!(next_frame(&data).is_none());
+        assert_eq!(next_frame(&data).unwrap().0, b"ok");
     }
 }

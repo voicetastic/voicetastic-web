@@ -7,21 +7,29 @@ own machine and the page talks to it directly over **Web Serial**.
 This reuses the desktop engine (`voicetastic-core`) compiled to `wasm32`, rather than
 reimplementing the protocol. See the architecture notes below.
 
-## Status: connectivity gate
+## Status: browser driver over the sans-IO core
 
-This repo currently contains a **single proof-of-connectivity gate**, not the full
-client. `connect_and_read_my_node_info()`:
+This is a real driver for `voicetastic-core`'s sans-IO protocol core — the wasm sibling
+of the desktop's native `MeshtasticService`. It runs the **same** protocol logic the
+desktop and Android clients use, with the browser supplying only the platform glue.
+
+`connect(onEvent)`:
 
 1. opens a user-selected serial port (Web Serial),
-2. sends a `WantConfigId` `ToRadio`, framed with the `0x94 0xc3` Meshtastic serial header,
-3. reads + deframes the inbound byte stream,
-4. decodes each `FromRadio` and resolves with the node number once `MyNodeInfo` arrives.
+2. sends a `WantConfigId` built by `voicetastic_core::protocol::want_config`,
+3. spawns a background read loop (`spawn_local`) that deframes the `0x94 0xc3` stream and
+   feeds each frame through `protocol::decode_inbound`, applying snapshot events to
+   `protocol::ProtocolState` and surfacing a summary of every event to `onEvent`,
+4. returns a `WebClient` whose `sendText(...)` builds packets with
+   `protocol::text_packet` and writes them back.
 
-It reuses `voicetastic-core`'s protobuf types (`proto::ToRadio` / `proto::FromRadio`)
-for encode/decode. It deliberately does **not** yet use core's `Transport` trait or
-`connect_with_transport` — those require `Send` (browser JS handles are `!Send`) and a
-*driven* tokio runtime. Isolating the Web Serial + wire-framing + protobuf risk first
-keeps the gate trustworthy; the core-`Transport` integration is the next step (below).
+No Meshtastic decode/build/state logic lives in this crate — only Web Serial, the serial
+framing, and ferrying events to JS. That's the payoff of the sans-IO refactor in
+`voicetastic-core` (the `protocol` module): one protocol implementation, two drivers.
+
+Not yet wired up: audio capture/playback, the Codec2 WASM codec, and voice send/receive
+(NACK retransmit stays native-only for now). Those are the remaining steps toward a full
+voice client.
 
 ## Build
 

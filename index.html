@@ -3,11 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Voicetastic Web — connectivity gate</title>
+    <title>Voicetastic Web — driver demo</title>
     <style>
       body {
         font-family: system-ui, sans-serif;
-        max-width: 40rem;
+        max-width: 44rem;
         margin: 3rem auto;
         padding: 0 1rem;
         background: #100e0d;
@@ -15,7 +15,7 @@
       }
       button {
         font-size: 1rem;
-        padding: 0.7rem 1.25rem;
+        padding: 0.6rem 1.1rem;
         border-radius: 10px;
         border: 1px solid #333;
         background: #ffdfd5;
@@ -23,52 +23,103 @@
         font-weight: 600;
         cursor: pointer;
       }
-      #status {
+      button:disabled { opacity: 0.5; cursor: default; }
+      input {
+        font-size: 1rem;
+        padding: 0.55rem 0.7rem;
+        border-radius: 8px;
+        border: 1px solid #333;
+        background: #1c1918;
+        color: #fff;
+        flex: 1;
+      }
+      .row { display: flex; gap: 0.5rem; margin-top: 1rem; align-items: center; }
+      #log {
         margin-top: 1.5rem;
         padding: 1rem;
         border: 1px solid #231f1d;
         border-radius: 10px;
         background: #1c1918;
-        white-space: pre-wrap;
         font-family: ui-monospace, monospace;
+        font-size: 0.85rem;
+        white-space: pre-wrap;
+        max-height: 24rem;
+        overflow-y: auto;
       }
       .muted { color: #aba29f; }
     </style>
   </head>
   <body>
-    <h1>Voicetastic Web — connectivity gate</h1>
+    <h1>Voicetastic Web — driver demo</h1>
     <p class="muted">
-      Plug a Meshtastic radio in via USB, click below, and pick the serial port.
-      This sends a <code>WantConfigId</code> and waits for <code>MyNodeInfo</code>,
-      reusing <code>voicetastic-core</code>'s protobuf types compiled to WASM.
-      Requires Chrome/Edge or Firefox 151+ over <code>localhost</code> or HTTPS.
+      Plug in a Meshtastic radio over USB and click Connect. The page runs
+      <code>voicetastic-core</code>'s actual protocol core (decode +
+      <code>ProtocolState</code> + builders) over Web Serial — the same logic
+      the desktop and Android clients use. Each decoded event is logged below.
+      Requires Chrome/Edge or Firefox 151+ over localhost/HTTPS.
     </p>
-    <button id="go">Connect &amp; read node info</button>
-    <div id="status" class="muted">Idle.</div>
+
+    <button id="connect">Connect</button>
+
+    <div class="row">
+      <input id="text" type="text" placeholder="broadcast a text message…" disabled />
+      <button id="send" disabled>Send</button>
+    </div>
+
+    <div id="log" class="muted">Idle.</div>
 
     <script type="module">
-      import init, { connect_and_read_my_node_info } from './pkg/voicetastic_web.js';
+      import init, { connect } from './pkg/voicetastic_web.js';
 
-      const status = document.getElementById('status');
-      const go = document.getElementById('go');
+      const logEl = document.getElementById('log');
+      const connectBtn = document.getElementById('connect');
+      const textEl = document.getElementById('text');
+      const sendBtn = document.getElementById('send');
+      let client = null;
+
+      const log = (line) => {
+        logEl.classList.remove('muted');
+        logEl.textContent += (logEl.textContent === 'Idle.' ? '' : '\n') + line;
+        logEl.scrollTop = logEl.scrollHeight;
+      };
 
       if (!('serial' in navigator)) {
-        status.textContent =
+        logEl.textContent =
           'Web Serial unavailable. Use Chrome/Edge or Firefox 151+ over localhost/HTTPS.';
-        go.disabled = true;
+        connectBtn.disabled = true;
       } else {
         await init();
-        status.textContent = 'WASM loaded. Ready.';
-        go.onclick = async () => {
-          status.textContent = 'Requesting port…';
+        log('WASM loaded. Ready to connect.');
+
+        connectBtn.onclick = async () => {
+          connectBtn.disabled = true;
+          log('Requesting port…');
           try {
-            const nodeNum = await connect_and_read_my_node_info();
-            status.textContent =
-              `✅ Connected. MyNodeInfo node_num = ${nodeNum} (0x${(nodeNum >>> 0).toString(16)})`;
+            client = await connect((event) => log('  ⟵ ' + event));
+            log('Connected. Config handshake in flight…');
+            textEl.disabled = false;
+            sendBtn.disabled = false;
           } catch (e) {
-            status.textContent = `❌ ${e}`;
+            log('❌ ' + e);
+            connectBtn.disabled = false;
           }
         };
+
+        const doSend = async () => {
+          const text = textEl.value.trim();
+          if (!text || !client) return;
+          try {
+            await client.sendText(text, 0, undefined); // channel 0, broadcast
+            log('  ⟶ sent: ' + text);
+            textEl.value = '';
+          } catch (e) {
+            log('❌ send failed: ' + e);
+          }
+        };
+        sendBtn.onclick = doSend;
+        textEl.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') doSend();
+        });
       }
     </script>
   </body>
