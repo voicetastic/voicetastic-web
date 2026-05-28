@@ -307,6 +307,29 @@ impl WebClient {
         self.inner.denoise_enabled.set(enabled);
     }
 
+    /// Active node-discovery ping: broadcast our `User` on `NODEINFO_APP` with
+    /// `want_response = true` so peers reply with their own NodeInfo. Replies
+    /// arrive over the next several seconds as the normal `NodeInfo` events,
+    /// updating `ProtocolState.nodes`. Rejects with an error if the radio
+    /// hasn't yet reported our owner (call after `ConfigComplete`).
+    #[wasm_bindgen(js_name = discoverNodes)]
+    pub fn discover_nodes(&self) -> js_sys::Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let owner = inner
+                .state
+                .borrow()
+                .owner
+                .clone()
+                .ok_or_else(|| err("owner not yet known — wait for ConfigComplete"))?;
+            let id = inner.alloc_id();
+            let pv = protocol::nodeinfo_request_packet(id, &owner, 0)
+                .map_err(|e| err(&format!("build discovery: {e}")))?;
+            inner.write_payload(pv).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
     /// Send a voice clip: mono f32 PCM at `in_rate` Hz, encoded with Codec2 and
     /// sent as paced PRIVATE_APP frames. `to` undefined = broadcast.
     #[wasm_bindgen(js_name = sendVoice)]

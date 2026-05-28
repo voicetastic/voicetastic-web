@@ -283,6 +283,7 @@
         </p>
         <div class="row">
           <button id="connect">Connect</button>
+          <button id="discover" class="ghost" hidden disabled>🔍 Scan for nodes</button>
           <span id="connect-hint" class="muted">Click Connect, then pick the serial port.</span>
         </div>
         <div id="info" class="card" hidden>
@@ -369,6 +370,7 @@
       const recBtn = document.getElementById('record');
       const recTimer = document.getElementById('rectimer');
       const denoiseEl = document.getElementById('denoise');
+      const discoverBtn = document.getElementById('discover');
       const threadEl = document.getElementById('chat-thread');
       const chatEl = document.getElementById('chat-messages');
 
@@ -526,6 +528,7 @@
         if (line.includes('ConfigComplete')) {
           setStatus('Ready', 'ready');
           connectHint.textContent = 'Connected and configured. Go to Chat to start talking.';
+          discoverBtn.disabled = false;
           return;
         }
         // 💬 text from 0xHEX: body
@@ -646,6 +649,7 @@
             sendBtn.disabled = false;
             recBtn.disabled = false;
             denoiseEl.disabled = false;
+            discoverBtn.hidden = false; // visible once connected, enabled at Ready
             renderChat(); // refresh placeholder text
           } catch (e) {
             log('❌ ' + e);
@@ -688,6 +692,26 @@
             recording = null;
             recBtn.textContent = '🎙 Record';
             recBtn.classList.remove('rec');
+          }
+        };
+
+        discoverBtn.onclick = async () => {
+          if (!client) return;
+          discoverBtn.disabled = true;
+          const prevLabel = discoverBtn.textContent;
+          discoverBtn.textContent = '🔍 Scanning…';
+          log('  ⟶ broadcasting NodeInfo discovery ping (want_response=true)');
+          try {
+            await client.discoverNodes();
+            log('  ⟶ scan ping sent — replies arrive over the next few seconds as NodeInfo events');
+          } catch (e) {
+            log('❌ scan failed: ' + e);
+          } finally {
+            // Allow another scan after a short cooldown so we don't saturate the mesh.
+            setTimeout(() => {
+              discoverBtn.textContent = prevLabel;
+              discoverBtn.disabled = false;
+            }, 4000);
           }
         };
       }
