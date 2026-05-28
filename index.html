@@ -427,6 +427,12 @@
                 Capture-side denoise via core's <code>codec::Denoiser</code>.
               </span>
             </div>
+            <label for="send-codec">Send codec</label>
+            <select id="send-codec" disabled>
+              <option value="codec2">Codec2 (pure Rust, the only wasm-buildable encoder)</option>
+              <option value="amrnb" disabled>AMR-NB (encoder unavailable in browser)</option>
+              <option value="opus" disabled>Opus (encoder unavailable in browser)</option>
+            </select>
             <label for="codec-mode">Codec2 mode</label>
             <select id="codec-mode" disabled>
               <option value="0">3200 bps — best quality (default)</option>
@@ -436,6 +442,11 @@
               <option value="4">1300 bps</option>
               <option value="5">1200 bps — lowest airtime</option>
             </select>
+            <label>Playback support</label>
+            <div class="muted" style="font-size:0.85rem;">
+              ✓ Codec2 &nbsp;·&nbsp; ✓ Opus (via pure-Rust <code>opus-decoder</code>)
+              &nbsp;·&nbsp; ✗ AMR-NB (needs C lib that doesn't build for wasm)
+            </div>
           </div>
         </details>
       </section>

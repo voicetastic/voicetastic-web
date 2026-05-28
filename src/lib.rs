@@ -18,7 +18,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use prost::Message as _;
-use voicetastic_core::codec::{Denoiser, codec2_decode, codec2_encode};
+use voicetastic_core::codec::{Denoiser, codec2_decode, codec2_encode, opus_decode};
 use voicetastic_core::node::NodeId;
 use voicetastic_core::ports::PRIVATE_APP;
 use voicetastic_core::proto::ToRadio;
@@ -674,11 +674,20 @@ fn handle_voice(
                     msg.total_data
                 ),
             );
-            if msg.codec != VoiceCodec::Codec2 {
-                log(&format!("voice: codec {:?} not playable in v1 (Codec2 only)", msg.codec));
-                return;
-            }
-            match codec2_decode(&msg.audio, msg.codec_param) {
+            // Dispatch by codec — Codec2 and Opus both have pure-Rust decoders
+            // in core (codec::c2 + codec::opus_d), AMR-NB needs the C lib that
+            // doesn't build for wasm.
+            let decoded = match msg.codec {
+                VoiceCodec::Codec2 => codec2_decode(&msg.audio, msg.codec_param),
+                VoiceCodec::Opus => opus_decode(&msg.audio, msg.codec_param),
+                other => {
+                    log(&format!(
+                        "voice: codec {other:?} not playable in browser (only Codec2 + Opus have pure-Rust decoders)"
+                    ));
+                    return;
+                }
+            };
+            match decoded {
                 Ok((pcm, rate)) => {
                     let arr = js_sys::Float32Array::from(pcm.as_slice());
                     let _ = on_voice.call3(
