@@ -462,3 +462,84 @@ pub(crate) fn fixed_position_payload(dto: FixedPositionDto) -> admin_message::Pa
         ..Default::default()
     })
 }
+
+// =============================================================================
+// WebClient wasm-bindgen surface — read snapshot + 9 per-section write methods.
+//
+// Each writer is a thin Promise that:
+//   1. deserialises the JS-side DTO via `serde_wasm_bindgen`
+//   2. hands it to the matching `*_payload` builder above (overlays it on the
+//      current `ProtocolState` so fields the DTO doesn't carry keep their
+//      device-reported value — the same effect desktop's dirty-tracking gives)
+//   3. ships the resulting admin message via `Inner::send_admin`
+//
+// The shape is identical across sections — eight of the nine writes go through
+// the `write_config!` macro to make that uniformity legible. `setFixedPosition`
+// is the odd one out (no state overlay; it's a one-shot location set) so it
+// stays a literal definition.
+// =============================================================================
+
+use crate::WebClient;
+use crate::util::err;
+use wasm_bindgen::prelude::*;
+use wasm_bindgen_futures::future_to_promise;
+
+/// One-section setter: deserialise DTO, build the payload, send_admin.
+/// Expands to a full `impl WebClient { ... }` block — multiple impl blocks
+/// for the same type are fine, and Rust doesn't allow macros directly
+/// inside an `impl` body.
+macro_rules! write_config {
+    ($rust:ident, $js:ident, $dto:ident, $payload:path, $tag:literal) => {
+        #[wasm_bindgen]
+        impl WebClient {
+            #[wasm_bindgen(js_name = $js)]
+            pub fn $rust(&self, dto: JsValue) -> js_sys::Promise {
+                let inner = self.inner.clone();
+                future_to_promise(async move {
+                    let dto: $dto = serde_wasm_bindgen::from_value(dto)
+                        .map_err(|e| err(&format!(concat!($tag, " dto: {}"), e)))?;
+                    let payload = $payload(&inner.state.borrow(), dto);
+                    inner.send_admin(payload).await?;
+                    Ok(JsValue::UNDEFINED)
+                })
+            }
+        }
+    };
+}
+
+write_config!(write_owner,            writeOwner,            OwnerDto,     owner_payload,     "owner");
+write_config!(write_lora_config,      writeLoraConfig,       LoraDto,      lora_payload,      "lora");
+write_config!(write_device_config,    writeDeviceConfig,     DeviceDto,    device_payload,    "device");
+write_config!(write_position_config,  writePositionConfig,   PositionDto,  position_payload,  "position");
+write_config!(write_power_config,     writePowerConfig,      PowerDto,     power_payload,     "power");
+write_config!(write_network_config,   writeNetworkConfig,    NetworkDto,   network_payload,   "network");
+write_config!(write_display_config,   writeDisplayConfig,    DisplayDto,   display_payload,   "display");
+write_config!(write_bluetooth_config, writeBluetoothConfig,  BluetoothDto, bluetooth_payload, "bluetooth");
+write_config!(write_channel,          writeChannel,          ChannelDto,   channel_payload,   "channel");
+
+#[wasm_bindgen]
+impl WebClient {
+    /// Snapshot of the device identity + the eight config sections + channels,
+    /// as a plain JS object (via serde-wasm-bindgen). Fields the radio hasn't
+    /// reported yet are `null`. Mirrors what `MeshtasticService::watch_*` give
+    /// the desktop GUI.
+    #[wasm_bindgen(js_name = snapshot)]
+    pub fn snapshot(&self) -> Result<JsValue, JsValue> {
+        let snap = build_snapshot(&self.inner.state.borrow());
+        serde_wasm_bindgen::to_value(&snap).map_err(|e| err(&format!("snapshot: {e}")))
+    }
+
+    /// One-shot fixed-position write — no state overlay because the device
+    /// only stores the lat/lon/alt triple (not a richer config).
+    #[wasm_bindgen(js_name = setFixedPosition)]
+    pub fn set_fixed_position(&self, dto: JsValue) -> js_sys::Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let dto: FixedPositionDto = serde_wasm_bindgen::from_value(dto)
+                .map_err(|e| err(&format!("fixed position dto: {e}")))?;
+            let payload = fixed_position_payload(dto);
+            inner.send_admin(payload).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+}
