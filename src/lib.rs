@@ -12,6 +12,8 @@
 //! (Web Serial, framing, and ferrying events to a JS callback). That's the
 //! point of the sans-IO refactor: one protocol implementation, two drivers.
 
+mod settings;
+
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -121,6 +123,28 @@ impl Inner {
             .map_err(|e| err(&format!("build text: {e}")))?;
         self.write_payload(payload).await?;
         log(&format!("sent text id={id}"));
+        Ok(())
+    }
+
+    /// Build and write an admin message (config write, fixed-position, etc.)
+    /// addressed to our own node. Equivalent to `MeshtasticService::send_admin`
+    /// on native; routes through core's `protocol::admin_packet` builder.
+    async fn send_admin(
+        &self,
+        payload: voicetastic_core::proto::admin_message::PayloadVariant,
+    ) -> Result<(), JsValue> {
+        let to = self
+            .state
+            .borrow()
+            .my_info
+            .as_ref()
+            .map(|i| i.my_node_num)
+            .ok_or_else(|| err("not connected — own node number unknown"))?;
+        let id = self.alloc_id();
+        let pv = protocol::admin_packet(id, to, payload)
+            .map_err(|e| err(&format!("build admin: {e}")))?;
+        self.write_payload(pv).await?;
+        log(&format!("sent admin id={id}"));
         Ok(())
     }
 
@@ -343,6 +367,145 @@ impl WebClient {
         let inner = self.inner.clone();
         future_to_promise(async move {
             inner.send_voice(&pcm, in_rate as u32, channel, to).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    // ---------- Settings: read ----------
+
+    /// Snapshot of the device identity + the eight config sections + channels,
+    /// as a plain JS object (via serde-wasm-bindgen). Fields the radio hasn't
+    /// reported yet are `null`. Mirrors what `MeshtasticService::watch_*` give
+    /// the desktop GUI.
+    #[wasm_bindgen(js_name = snapshot)]
+    pub fn snapshot(&self) -> Result<JsValue, JsValue> {
+        let snap = settings::build_snapshot(&self.inner.state.borrow());
+        serde_wasm_bindgen::to_value(&snap).map_err(|e| err(&format!("snapshot: {e}")))
+    }
+
+    // ---------- Settings: write ----------
+    //
+    // Each setter overlays the DTO on the current config from ProtocolState so
+    // fields not in the DTO keep their device-reported value (the same effect
+    // desktop's dirty-tracking gives on the editable subset). All go through
+    // core's `protocol::admin_packet`, addressed to our own node.
+
+    #[wasm_bindgen(js_name = writeOwner)]
+    pub fn write_owner(&self, dto: JsValue) -> js_sys::Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let dto: settings::OwnerDto = serde_wasm_bindgen::from_value(dto)
+                .map_err(|e| err(&format!("owner dto: {e}")))?;
+            let payload = settings::owner_payload(&inner.state.borrow(), dto);
+            inner.send_admin(payload).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    #[wasm_bindgen(js_name = writeLoraConfig)]
+    pub fn write_lora_config(&self, dto: JsValue) -> js_sys::Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let dto: settings::LoraDto = serde_wasm_bindgen::from_value(dto)
+                .map_err(|e| err(&format!("lora dto: {e}")))?;
+            let payload = settings::lora_payload(&inner.state.borrow(), dto);
+            inner.send_admin(payload).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    #[wasm_bindgen(js_name = writeDeviceConfig)]
+    pub fn write_device_config(&self, dto: JsValue) -> js_sys::Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let dto: settings::DeviceDto = serde_wasm_bindgen::from_value(dto)
+                .map_err(|e| err(&format!("device dto: {e}")))?;
+            let payload = settings::device_payload(&inner.state.borrow(), dto);
+            inner.send_admin(payload).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    #[wasm_bindgen(js_name = writePositionConfig)]
+    pub fn write_position_config(&self, dto: JsValue) -> js_sys::Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let dto: settings::PositionDto = serde_wasm_bindgen::from_value(dto)
+                .map_err(|e| err(&format!("position dto: {e}")))?;
+            let payload = settings::position_payload(&inner.state.borrow(), dto);
+            inner.send_admin(payload).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    #[wasm_bindgen(js_name = writePowerConfig)]
+    pub fn write_power_config(&self, dto: JsValue) -> js_sys::Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let dto: settings::PowerDto = serde_wasm_bindgen::from_value(dto)
+                .map_err(|e| err(&format!("power dto: {e}")))?;
+            let payload = settings::power_payload(&inner.state.borrow(), dto);
+            inner.send_admin(payload).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    #[wasm_bindgen(js_name = writeNetworkConfig)]
+    pub fn write_network_config(&self, dto: JsValue) -> js_sys::Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let dto: settings::NetworkDto = serde_wasm_bindgen::from_value(dto)
+                .map_err(|e| err(&format!("network dto: {e}")))?;
+            let payload = settings::network_payload(&inner.state.borrow(), dto);
+            inner.send_admin(payload).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    #[wasm_bindgen(js_name = writeDisplayConfig)]
+    pub fn write_display_config(&self, dto: JsValue) -> js_sys::Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let dto: settings::DisplayDto = serde_wasm_bindgen::from_value(dto)
+                .map_err(|e| err(&format!("display dto: {e}")))?;
+            let payload = settings::display_payload(&inner.state.borrow(), dto);
+            inner.send_admin(payload).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    #[wasm_bindgen(js_name = writeBluetoothConfig)]
+    pub fn write_bluetooth_config(&self, dto: JsValue) -> js_sys::Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let dto: settings::BluetoothDto = serde_wasm_bindgen::from_value(dto)
+                .map_err(|e| err(&format!("bluetooth dto: {e}")))?;
+            let payload = settings::bluetooth_payload(&inner.state.borrow(), dto);
+            inner.send_admin(payload).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    #[wasm_bindgen(js_name = writeChannel)]
+    pub fn write_channel(&self, dto: JsValue) -> js_sys::Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let dto: settings::ChannelDto = serde_wasm_bindgen::from_value(dto)
+                .map_err(|e| err(&format!("channel dto: {e}")))?;
+            let payload = settings::channel_payload(&inner.state.borrow(), dto);
+            inner.send_admin(payload).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    #[wasm_bindgen(js_name = setFixedPosition)]
+    pub fn set_fixed_position(&self, dto: JsValue) -> js_sys::Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let dto: settings::FixedPositionDto = serde_wasm_bindgen::from_value(dto)
+                .map_err(|e| err(&format!("fixed position dto: {e}")))?;
+            let payload = settings::fixed_position_payload(dto);
+            inner.send_admin(payload).await?;
             Ok(JsValue::UNDEFINED)
         })
     }

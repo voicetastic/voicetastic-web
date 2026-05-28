@@ -216,6 +216,50 @@
         overflow-y: auto;
       }
 
+      /* ----- Settings ----- */
+      .setcard {
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        margin-top: 1rem;
+      }
+      .setcard > header {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 0.5rem; padding: 0.9rem 1.1rem;
+        border-bottom: 1px solid var(--border);
+      }
+      .setcard > header h3 { margin: 0; font-size: 1rem; }
+      .setcard > header .hint { font-size: 0.8rem; color: var(--text-muted); margin-right: auto; margin-left: 0.6rem; }
+      .setcard > .fields {
+        padding: 0.9rem 1.1rem;
+        display: grid;
+        grid-template-columns: minmax(11rem, 0.4fr) 1fr;
+        gap: 0.55rem 1rem;
+        align-items: center;
+      }
+      .setcard > .fields label { color: var(--text-muted); font-size: 0.9rem; }
+      .setcard > .fields .full { grid-column: 1 / -1; color: var(--text-muted); font-style: italic; }
+      .setcard input[type='text'],
+      .setcard input[type='number'],
+      .setcard select {
+        font-size: 0.95rem; padding: 0.4rem 0.55rem;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border);
+        background: var(--bg-elevated); color: var(--text);
+        width: 100%; min-width: 0;
+      }
+      .setcard input[type='text']:focus, .setcard input[type='number']:focus, .setcard select:focus {
+        outline: none; border-color: var(--accent);
+      }
+      .setcard input[type='checkbox'] { transform: scale(1.1); margin-right: 0.5rem; }
+      .setcard button.apply {
+        background: var(--accent); color: var(--accent-on);
+        font-size: 0.85rem; padding: 0.35rem 0.85rem;
+        border-radius: var(--radius-sm);
+      }
+      .setcard.disabled { opacity: 0.5; pointer-events: none; }
+      .channels-list .setcard { margin-top: 0.6rem; }
+
       /* ----- Map placeholder ----- */
       .map-stub {
         margin-top: 1rem;
@@ -331,18 +375,18 @@
       <section id="page-settings" class="page">
         <h1>Settings</h1>
         <p class="lead">
-          Device configuration — LoRa, Device, Position, Power, Network, Display,
-          Bluetooth, Channels, Owner. Read-only for now; live writes will land in a
-          follow-up.
+          Device configuration — Owner, LoRa, Device, Position, Power, Network,
+          Display, Bluetooth, plus per-channel settings. Each card mirrors what
+          the desktop GUI's Settings tab shows: the form is populated from the
+          live <code>ProtocolState</code> snapshot, and Apply rebuilds a config
+          message via core's <code>admin_packet</code> and sends it to your
+          radio. Connect first.
         </p>
-        <div class="card">
-          <h3>Coming soon</h3>
-          <p class="muted" style="margin:0">
-            All read-side state already flows through
-            <code>voicetastic_core::protocol::ProtocolState</code>; the panels just
-            need to be wired up. Track progress in the project source.
-          </p>
+        <div class="row" style="margin-bottom:1rem;">
+          <button id="settings-refresh" disabled>Refresh from device</button>
+          <span id="settings-hint" class="muted">Connect a radio to load settings.</span>
         </div>
+        <div id="settings-cards"></div>
       </section>
 
       <!-- ================================= MAP ================================= -->
@@ -529,6 +573,9 @@
           setStatus('Ready', 'ready');
           connectHint.textContent = 'Connected and configured. Go to Chat to start talking.';
           discoverBtn.disabled = false;
+          // First snapshot is ready — render Settings now so the cards are
+          // populated whenever the user navigates there.
+          renderSettings();
           return;
         }
         // 💬 text from 0xHEX: body
@@ -650,6 +697,7 @@
             recBtn.disabled = false;
             denoiseEl.disabled = false;
             discoverBtn.hidden = false; // visible once connected, enabled at Ready
+            settingsRefreshBtn.disabled = false;
             renderChat(); // refresh placeholder text
           } catch (e) {
             log('❌ ' + e);
@@ -694,6 +742,276 @@
             recBtn.classList.remove('rec');
           }
         };
+
+        // ============================== SETTINGS ==============================
+        const settingsCardsEl = document.getElementById('settings-cards');
+        const settingsRefreshBtn = document.getElementById('settings-refresh');
+        const settingsHintEl = document.getElementById('settings-hint');
+        // Field metadata for each section. type ∈ text|int|float|bool|enum.
+        // For enum, `options: [[value, label], ...]`.
+        const MODEM_PRESETS = [
+          [0, 'LongFast'], [1, 'LongSlow'], [2, 'VeryLongSlow'], [3, 'MediumSlow'],
+          [4, 'MediumFast'], [5, 'ShortSlow'], [6, 'ShortFast'], [7, 'LongModerate'],
+          [8, 'ShortTurbo'],
+        ];
+        const DEVICE_ROLES = [
+          [0, 'Client'], [1, 'ClientMute'], [2, 'Router'], [4, 'RouterClient'],
+          [5, 'Repeater'], [6, 'Tracker'], [7, 'Sensor'], [8, 'TAK'],
+          [9, 'ClientHidden'], [10, 'LostAndFound'], [11, 'TAKTracker'],
+        ];
+        const BT_MODES = [[0, 'RandomPin'], [1, 'FixedPin'], [2, 'NoPin']];
+        const DISPLAY_UNITS = [[0, 'Metric'], [1, 'Imperial']];
+        const ADDR_MODES = [[0, 'DHCP'], [1, 'Static']];
+        const SECTIONS = [
+          { key: 'owner', title: '👤 Owner', writeFn: 'writeOwner', fields: [
+            { name: 'long_name', label: 'Long name', type: 'text' },
+            { name: 'short_name', label: 'Short name (≤4)', type: 'text', maxlength: 4 },
+            { name: 'is_licensed', label: 'Licensed (HAM)', type: 'bool' },
+          ]},
+          { key: 'lora', title: '📡 LoRa / Radio', writeFn: 'writeLoraConfig', fields: [
+            { name: 'use_preset', label: 'Use modem preset', type: 'bool' },
+            { name: 'modem_preset', label: 'Modem preset', type: 'enum', options: MODEM_PRESETS },
+            { name: 'region', label: 'Region (int code)', type: 'int' },
+            { name: 'hop_limit', label: 'Hop limit', type: 'int', min: 1, max: 7 },
+            { name: 'tx_power', label: 'TX power (dBm)', type: 'int' },
+            { name: 'tx_enabled', label: 'TX enabled', type: 'bool' },
+            { name: 'ignore_mqtt', label: 'Ignore MQTT', type: 'bool' },
+            { name: 'channel_num', label: 'Channel num', type: 'int' },
+            { name: 'bandwidth', label: 'Bandwidth (manual)', type: 'int' },
+            { name: 'spread_factor', label: 'Spread factor (manual)', type: 'int' },
+            { name: 'coding_rate', label: 'Coding rate (manual)', type: 'int' },
+            { name: 'frequency_offset', label: 'Frequency offset (Hz)', type: 'float' },
+          ]},
+          { key: 'device', title: '📱 Device', writeFn: 'writeDeviceConfig', fields: [
+            { name: 'role', label: 'Role', type: 'enum', options: DEVICE_ROLES },
+            { name: 'rebroadcast_mode', label: 'Rebroadcast mode (int)', type: 'int' },
+            { name: 'node_info_broadcast_secs', label: 'NodeInfo broadcast (s)', type: 'int' },
+            { name: 'double_tap_as_button_press', label: 'Double-tap as button', type: 'bool' },
+            { name: 'disable_triple_click', label: 'Disable triple-click', type: 'bool' },
+            { name: 'button_gpio', label: 'Button GPIO', type: 'int' },
+            { name: 'buzzer_gpio', label: 'Buzzer GPIO', type: 'int' },
+          ]},
+          { key: 'position', title: '📍 Position', writeFn: 'writePositionConfig', fields: [
+            { name: 'gps_enabled', label: 'GPS enabled', type: 'bool' },
+            { name: 'fixed_position', label: 'Fixed position', type: 'bool' },
+            { name: 'position_broadcast_secs', label: 'Broadcast interval (s)', type: 'int' },
+            { name: 'gps_update_interval', label: 'GPS update interval (s)', type: 'int' },
+            { name: 'position_broadcast_smart_enabled', label: 'Smart broadcast', type: 'bool' },
+            { name: 'broadcast_smart_minimum_distance', label: 'Smart min distance (m)', type: 'int' },
+            { name: 'broadcast_smart_minimum_interval_secs', label: 'Smart min interval (s)', type: 'int' },
+          ]},
+          { key: 'power', title: '🔋 Power', writeFn: 'writePowerConfig', fields: [
+            { name: 'is_power_saving', label: 'Power saving', type: 'bool' },
+            { name: 'on_battery_shutdown_after_secs', label: 'Shutdown on battery (s)', type: 'int' },
+            { name: 'wait_bluetooth_secs', label: 'Wait Bluetooth (s)', type: 'int' },
+            { name: 'sds_secs', label: 'SDS (s)', type: 'int' },
+            { name: 'ls_secs', label: 'LS (s)', type: 'int' },
+            { name: 'min_wake_secs', label: 'Min wake (s)', type: 'int' },
+          ]},
+          { key: 'network', title: '🌐 Network', writeFn: 'writeNetworkConfig', fields: [
+            { name: 'wifi_enabled', label: 'Wi-Fi enabled', type: 'bool' },
+            { name: 'wifi_ssid', label: 'Wi-Fi SSID', type: 'text' },
+            { name: 'wifi_psk', label: 'Wi-Fi PSK (blank = keep)', type: 'text' },
+            { name: 'eth_enabled', label: 'Ethernet enabled', type: 'bool' },
+            { name: 'address_mode', label: 'Address mode', type: 'enum', options: ADDR_MODES },
+            { name: 'ntp_server', label: 'NTP server', type: 'text' },
+            { name: 'rsyslog_server', label: 'rsyslog server', type: 'text' },
+          ]},
+          { key: 'display', title: '🖥 Display', writeFn: 'writeDisplayConfig', fields: [
+            { name: 'screen_on_secs', label: 'Screen on (s)', type: 'int' },
+            { name: 'auto_screen_carousel_secs', label: 'Auto carousel (s)', type: 'int' },
+            { name: 'units', label: 'Units', type: 'enum', options: DISPLAY_UNITS },
+            { name: 'oled', label: 'OLED type (int)', type: 'int' },
+            { name: 'displaymode', label: 'Display mode (int)', type: 'int' },
+            { name: 'flip_screen', label: 'Flip screen', type: 'bool' },
+            { name: 'heading_bold', label: 'Heading bold', type: 'bool' },
+            { name: 'wake_on_tap_or_motion', label: 'Wake on tap/motion', type: 'bool' },
+            { name: 'use_12h_clock', label: '12-hour clock', type: 'bool' },
+          ]},
+          { key: 'bluetooth', title: '🔵 Bluetooth', writeFn: 'writeBluetoothConfig', fields: [
+            { name: 'enabled', label: 'Enabled', type: 'bool' },
+            { name: 'mode', label: 'Pairing mode', type: 'enum', options: BT_MODES },
+            { name: 'fixed_pin', label: 'Fixed PIN', type: 'int' },
+          ]},
+        ];
+
+        function inputForField(f, value) {
+          if (f.type === 'bool') {
+            const i = document.createElement('input');
+            i.type = 'checkbox'; i.name = f.name; i.checked = !!value;
+            return i;
+          }
+          if (f.type === 'enum') {
+            const sel = document.createElement('select');
+            sel.name = f.name;
+            for (const [v, label] of f.options) {
+              const opt = document.createElement('option');
+              opt.value = String(v); opt.textContent = `${label} (${v})`;
+              if (Number(value) === Number(v)) opt.selected = true;
+              sel.appendChild(opt);
+            }
+            return sel;
+          }
+          const i = document.createElement('input');
+          i.type = f.type === 'text' ? 'text' : 'number';
+          if (f.type === 'float') i.step = 'any';
+          if (f.maxlength) i.maxLength = f.maxlength;
+          if (f.min != null) i.min = f.min;
+          if (f.max != null) i.max = f.max;
+          i.name = f.name;
+          i.value = value == null ? '' : String(value);
+          return i;
+        }
+
+        function readField(f, el) {
+          if (f.type === 'bool') return el.checked;
+          if (f.type === 'enum' || f.type === 'int') return parseInt(el.value || '0', 10);
+          if (f.type === 'float') return parseFloat(el.value || '0');
+          return el.value;
+        }
+
+        function renderSection(section, sectionValue) {
+          const card = document.createElement('div');
+          card.className = 'setcard';
+          card.dataset.section = section.key;
+          const hdr = document.createElement('header');
+          hdr.innerHTML = `<h3>${section.title}</h3>`;
+          if (!sectionValue) {
+            const h = document.createElement('span');
+            h.className = 'hint'; h.textContent = 'not received yet';
+            hdr.appendChild(h);
+            card.classList.add('disabled');
+          }
+          const apply = document.createElement('button');
+          apply.className = 'apply'; apply.textContent = 'Apply';
+          apply.onclick = async () => {
+            const dto = {};
+            for (const f of section.fields) {
+              const el = card.querySelector(`[name="${f.name}"]`);
+              dto[f.name] = el ? readField(f, el) : (f.type === 'bool' ? false : f.type === 'text' ? '' : 0);
+            }
+            apply.disabled = true;
+            const prev = apply.textContent;
+            apply.textContent = 'Applying…';
+            try {
+              await client[section.writeFn](dto);
+              log(`  ⟶ applied ${section.key} config`);
+              apply.textContent = '✓ Sent';
+              setTimeout(() => { apply.textContent = prev; apply.disabled = false; }, 1500);
+            } catch (e) {
+              log(`❌ apply ${section.key}: ${e}`);
+              apply.textContent = '✗ Failed';
+              setTimeout(() => { apply.textContent = prev; apply.disabled = false; }, 2000);
+            }
+          };
+          hdr.appendChild(apply);
+          card.appendChild(hdr);
+
+          const fields = document.createElement('div');
+          fields.className = 'fields';
+          const sv = sectionValue || {};
+          for (const f of section.fields) {
+            const lab = document.createElement('label');
+            lab.textContent = f.label;
+            fields.appendChild(lab);
+            fields.appendChild(inputForField(f, sv[f.name]));
+          }
+          card.appendChild(fields);
+          return card;
+        }
+
+        function renderChannelsCard(channels) {
+          const wrap = document.createElement('div');
+          const card = document.createElement('div');
+          card.className = 'setcard';
+          const hdr = document.createElement('header');
+          hdr.innerHTML = `<h3>💬 Channels</h3><span class="hint">${(channels || []).length} configured</span>`;
+          card.appendChild(hdr);
+          const fields = document.createElement('div');
+          fields.className = 'fields';
+          fields.style.gridTemplateColumns = '1fr';
+          if (!channels || channels.length === 0) {
+            const note = document.createElement('div');
+            note.className = 'full'; note.textContent = 'No channel info yet.';
+            fields.appendChild(note);
+          } else {
+            for (const c of channels) {
+              fields.appendChild(renderOneChannel(c));
+            }
+          }
+          card.appendChild(fields);
+          wrap.appendChild(card);
+          return wrap;
+        }
+        function renderOneChannel(ch) {
+          const row = document.createElement('div');
+          row.style.display = 'grid';
+          row.style.gridTemplateColumns = '4rem 1fr auto auto auto';
+          row.style.gap = '0.5rem';
+          row.style.alignItems = 'center';
+          row.style.padding = '0.4rem 0';
+          row.style.borderTop = '1px solid var(--border)';
+          row.dataset.index = String(ch.index);
+          const idx = document.createElement('span'); idx.className = 'muted'; idx.textContent = `#${ch.index}`;
+          const name = document.createElement('input'); name.type = 'text'; name.placeholder = 'Channel name';
+          name.value = ch.name || ''; name.dataset.field = 'name';
+          const up = document.createElement('label'); up.style.fontSize = '0.85rem';
+          const upChk = document.createElement('input'); upChk.type = 'checkbox'; upChk.checked = !!ch.uplink_enabled; upChk.dataset.field = 'uplink_enabled';
+          up.appendChild(upChk); up.appendChild(document.createTextNode(' uplink'));
+          const dn = document.createElement('label'); dn.style.fontSize = '0.85rem';
+          const dnChk = document.createElement('input'); dnChk.type = 'checkbox'; dnChk.checked = !!ch.downlink_enabled; dnChk.dataset.field = 'downlink_enabled';
+          dn.appendChild(dnChk); dn.appendChild(document.createTextNode(' downlink'));
+          const apply = document.createElement('button');
+          apply.className = 'apply'; apply.textContent = 'Apply';
+          apply.onclick = async () => {
+            const dto = {
+              index: ch.index, role: ch.role,
+              name: name.value,
+              uplink_enabled: upChk.checked,
+              downlink_enabled: dnChk.checked,
+            };
+            apply.disabled = true;
+            const prev = apply.textContent; apply.textContent = '…';
+            try {
+              await client.writeChannel(dto);
+              log(`  ⟶ applied channel ${ch.index}`);
+              apply.textContent = '✓';
+              setTimeout(() => { apply.textContent = prev; apply.disabled = false; }, 1500);
+            } catch (e) {
+              log(`❌ apply channel ${ch.index}: ${e}`);
+              apply.textContent = '✗';
+              setTimeout(() => { apply.textContent = prev; apply.disabled = false; }, 2000);
+            }
+          };
+          row.appendChild(idx); row.appendChild(name); row.appendChild(up); row.appendChild(dn); row.appendChild(apply);
+          return row;
+        }
+
+        function renderSettings() {
+          if (!client) {
+            settingsCardsEl.innerHTML = '';
+            settingsHintEl.textContent = 'Connect a radio to load settings.';
+            return;
+          }
+          let snap;
+          try { snap = client.snapshot(); }
+          catch (e) { settingsHintEl.textContent = 'snapshot failed: ' + e; return; }
+          settingsCardsEl.innerHTML = '';
+          for (const section of SECTIONS) {
+            settingsCardsEl.appendChild(renderSection(section, snap[section.key]));
+          }
+          settingsCardsEl.appendChild(renderChannelsCard(snap.channels));
+          const known = SECTIONS.filter((s) => snap[s.key]).length + (snap.channels?.length ? 1 : 0);
+          settingsHintEl.textContent = `Loaded ${known} of ${SECTIONS.length + 1} section(s).`;
+        }
+
+        settingsRefreshBtn.onclick = renderSettings;
+
+        // Re-render the Settings page when the user navigates to it (snapshot
+        // may have changed in the background).
+        window.addEventListener('hashchange', () => {
+          if (location.hash.startsWith('#/settings')) renderSettings();
+        });
 
         discoverBtn.onclick = async () => {
           if (!client) return;

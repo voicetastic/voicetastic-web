@@ -25,6 +25,10 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 getrandom = { version = "0.4.2", features = ["wasm_js"] }
+# Settings IO: pass typed structs between Rust and JS for the snapshot
+# accessor + per-section write methods.
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
 
 # console.log + the (still-unstable) Web Serial bindings.
 [dependencies.web-sys]
