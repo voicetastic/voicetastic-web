@@ -764,24 +764,29 @@ fn handle_voice(
             // AMR-NB and Opus go through their vendored emscripten wasms via
             // JS shims, which are async — those branches spawn local futures
             // and feed the resulting PCM back to `on_voice` when it lands.
+            let to_str = voice_dest_str(&msg.to);
+            let channel = msg.channel;
+            let codec_id = msg.codec;
             match msg.codec {
-                VoiceCodec::Codec2 => play_or_log(&codec2_decode(&msg.audio, msg.codec_param), on_voice, &from),
+                VoiceCodec::Codec2 => emit_voice_or_log(
+                    &codec2_decode(&msg.audio, msg.codec_param),
+                    on_voice,
+                    &from,
+                    &to_str,
+                    channel,
+                    codec_id,
+                ),
                 VoiceCodec::Opus => {
                     let payload = msg.audio.clone();
                     let codec_param = msg.codec_param;
                     let on_voice = on_voice.clone();
                     let from = from.clone();
+                    let to_str = to_str.clone();
                     wasm_bindgen_futures::spawn_local(async move {
                         match opus_wasm_decode(&payload, codec_param).await {
-                            Ok((pcm, rate)) => {
-                                let arr = js_sys::Float32Array::from(pcm.as_slice());
-                                let _ = on_voice.call3(
-                                    &JsValue::NULL,
-                                    &arr,
-                                    &JsValue::from_f64(rate as f64),
-                                    &JsValue::from_str(&from),
-                                );
-                            }
+                            Ok((pcm, rate)) => emit_voice(
+                                &on_voice, &pcm, rate, &from, &to_str, channel, codec_id,
+                            ),
                             Err(e) => log(&format!("Opus decode failed: {e:?}")),
                         }
                     });
@@ -790,17 +795,12 @@ fn handle_voice(
                     let payload = msg.audio.clone();
                     let on_voice = on_voice.clone();
                     let from = from.clone();
+                    let to_str = to_str.clone();
                     wasm_bindgen_futures::spawn_local(async move {
                         match amrnb_decode(&payload).await {
-                            Ok((pcm, rate)) => {
-                                let arr = js_sys::Float32Array::from(pcm.as_slice());
-                                let _ = on_voice.call3(
-                                    &JsValue::NULL,
-                                    &arr,
-                                    &JsValue::from_f64(rate as f64),
-                                    &JsValue::from_str(&from),
-                                );
-                            }
+                            Ok((pcm, rate)) => emit_voice(
+                                &on_voice, &pcm, rate, &from, &to_str, channel, codec_id,
+                            ),
                             Err(e) => log(&format!("AMR-NB decode failed: {e:?}")),
                         }
                     });
@@ -867,23 +867,64 @@ fn emit(cb: &js_sys::Function, line: &str) {
 }
 
 /// Hand a freshly-decoded PCM block to the JS playback callback, or log the
-/// codec error if decode failed. Shared by the Codec2 and Opus decode arms.
-fn play_or_log(
+/// codec error if decode failed. Packs all routing/metadata into one JS
+/// object so the chat-router can put the clip in the right thread:
+///
+/// ```ts
+/// { pcm: Float32Array, rate: number, from: string, to: string,
+///   channel: number, codec: string, duration_ms: number }
+/// ```
+///
+/// `to` follows the same `0x...` / `0xffffffff` convention used for text
+/// events — see [`voice_dest_str`].
+fn emit_voice(
+    on_voice: &js_sys::Function,
+    pcm: &[f32],
+    rate: u32,
+    from: &str,
+    to: &str,
+    channel: u32,
+    codec: voicetastic_core::voice::VoiceCodec,
+) {
+    let arr = js_sys::Float32Array::from(pcm);
+    let duration_ms = if rate > 0 {
+        (pcm.len() as f64 * 1000.0) / rate as f64
+    } else {
+        0.0
+    };
+    let detail = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&detail, &"pcm".into(), &arr.into());
+    let _ = js_sys::Reflect::set(&detail, &"rate".into(), &JsValue::from_f64(rate as f64));
+    let _ = js_sys::Reflect::set(&detail, &"from".into(), &JsValue::from_str(from));
+    let _ = js_sys::Reflect::set(&detail, &"to".into(), &JsValue::from_str(to));
+    let _ = js_sys::Reflect::set(&detail, &"channel".into(), &JsValue::from_f64(channel as f64));
+    let _ = js_sys::Reflect::set(&detail, &"codec".into(), &JsValue::from_str(codec_name(codec)));
+    let _ = js_sys::Reflect::set(&detail, &"duration_ms".into(), &JsValue::from_f64(duration_ms));
+    let _ = on_voice.call1(&JsValue::NULL, &detail);
+}
+
+/// Sync wrapper for codecs that decode without an await — Codec2 today.
+fn emit_voice_or_log(
     decoded: &Result<(Vec<f32>, u32), voicetastic_core::codec::CodecError>,
     on_voice: &js_sys::Function,
     from: &str,
+    to: &str,
+    channel: u32,
+    codec: voicetastic_core::voice::VoiceCodec,
 ) {
     match decoded {
-        Ok((pcm, rate)) => {
-            let arr = js_sys::Float32Array::from(pcm.as_slice());
-            let _ = on_voice.call3(
-                &JsValue::NULL,
-                &arr,
-                &JsValue::from_f64(*rate as f64),
-                &JsValue::from_str(from),
-            );
-        }
+        Ok((pcm, rate)) => emit_voice(on_voice, pcm, *rate, from, to, channel, codec),
         Err(e) => log(&format!("voice decode failed: {e}")),
+    }
+}
+
+fn codec_name(codec: voicetastic_core::voice::VoiceCodec) -> &'static str {
+    use voicetastic_core::voice::VoiceCodec::*;
+    match codec {
+        Codec2 => "codec2",
+        Opus => "opus",
+        AmrNb => "amrnb",
+        _ => "other",
     }
 }
 

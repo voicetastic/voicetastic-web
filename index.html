@@ -198,7 +198,16 @@
       .msg.out .who { color: var(--accent); }
       .msg.system .who { color: var(--warn); }
       .msg .body { word-break: break-word; }
-      .msg.voice .body::before { content: '🎙️ '; }
+      .voice-player { display: inline-flex; align-items: center; gap: 0.5rem; }
+      .voice-player::before { content: '🎙️'; }
+      .voice-play {
+        cursor: pointer; padding: 0.05rem 0.5rem; font-size: 0.85rem;
+        background: var(--bg-elev, #2a2a2a); color: inherit;
+        border: 1px solid var(--border); border-radius: 0.3rem;
+        font-family: ui-monospace, monospace; line-height: 1.2;
+      }
+      .voice-play:hover { background: var(--accent); color: var(--bg, #111); }
+      .voice-meta { font-size: 0.8rem; color: var(--text-muted); font-family: ui-monospace, monospace; }
       .chat-input { display: flex; gap: 0.5rem; padding: 0.75rem 1rem; border-top: 1px solid var(--border); align-items: center; flex-wrap: wrap; }
       .chat-input .grow { flex: 1; min-width: 12rem; display: flex; gap: 0.5rem; }
 
@@ -595,8 +604,26 @@
           const row = document.createElement('div');
           row.className = 'msg' + (m.kind ? ' ' + m.kind : '');
           const who = document.createElement('span'); who.className = 'who'; who.textContent = m.who;
-          const body = document.createElement('span'); body.className = 'body'; body.textContent = m.body;
-          row.appendChild(who); row.appendChild(body);
+          row.appendChild(who);
+          if (m.voice) {
+            const player = document.createElement('span');
+            player.className = 'body voice-player';
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'voice-play';
+            // Reflect playback state if this clip is the active one across re-renders.
+            btn.textContent = (currentVoice && currentVoice.id === m.voiceId) ? '⏹' : '▶';
+            btn.onclick = () => playVoice(m, btn);
+            if (currentVoice && currentVoice.id === m.voiceId) currentVoice.btnEl = btn;
+            const meta = document.createElement('span');
+            meta.className = 'voice-meta';
+            meta.textContent = `${fmtDuration(m.duration_ms)} · ${m.codec}`;
+            player.appendChild(btn); player.appendChild(meta);
+            row.appendChild(player);
+          } else {
+            const body = document.createElement('span'); body.className = 'body'; body.textContent = m.body;
+            row.appendChild(body);
+          }
           chatEl.appendChild(row);
         }
         chatEl.scrollTop = chatEl.scrollHeight;
@@ -675,11 +702,11 @@
           return;
         }
         // 🎙️ voice complete from !HEX_FROM to 0xHEX_TO chN (X chunks)
-        m = line.match(/^🎙️ voice complete from !?([0-9a-f]+) to 0x([0-9a-f]+) ch(\d+) \((\d+) chunks?\)/);
-        if (m) {
-          routeIncoming(m[1], m[2], parseInt(m[3], 10), `(voice, ${m[4]} chunks)`, 'in voice');
-          return;
-        }
+        //
+        // Don't push a chat row here — the real voice entry (with play
+        // controls + PCM attached) arrives via onVoice once decode finishes.
+        // We just let the line land in the event log as informational.
+        if (line.startsWith('🎙️ voice complete from ')) return;
       }
 
       // Decide which chat thread an inbound message belongs to, mirroring the
@@ -703,18 +730,91 @@
         // else: flood-routed traffic destined for another node — log only.
       }
 
-      // ---- Voice playback ----
-      const onVoice = (pcm, rate, from) => {
+      // ---- Voice inbox + mini player ----
+      //
+      // Inbound voice messages no longer auto-play. Each decoded clip is
+      // pushed into the chat thread as a `kind: 'in voice'` row carrying
+      // its PCM; renderChat draws a ▶ / ⏹ control. One playback is active
+      // at a time — clicking a new ▶ stops the previous clip.
+      let voiceSeq = 0;
+      let currentVoice = null; // { id, src, btnEl, onEnd }
+
+      function stopCurrentVoice() {
+        if (!currentVoice) return;
+        try { currentVoice.src.stop(); } catch (_) {}
+        if (currentVoice.btnEl) currentVoice.btnEl.textContent = '▶';
+        currentVoice = null;
+      }
+
+      function playVoice(msg, btnEl) {
+        // Toggle: clicking the active clip's button stops it.
+        if (currentVoice && currentVoice.id === msg.voiceId) {
+          stopCurrentVoice();
+          return;
+        }
+        stopCurrentVoice();
         try {
           if (!playCtx) playCtx = new AudioContext();
-          const buf = playCtx.createBuffer(1, pcm.length, rate);
-          buf.getChannelData(0).set(pcm);
+          const buf = playCtx.createBuffer(1, msg.pcm.length, msg.rate);
+          buf.getChannelData(0).set(msg.pcm);
           const src = playCtx.createBufferSource();
           src.buffer = buf;
           src.connect(playCtx.destination);
+          const id = msg.voiceId;
+          src.onended = () => {
+            if (currentVoice && currentVoice.id === id) {
+              if (btnEl) btnEl.textContent = '▶';
+              currentVoice = null;
+            }
+          };
           src.start();
-          log(`  ▶ playing ${(pcm.length / rate).toFixed(1)}s from ${from}`);
+          btnEl.textContent = '⏹';
+          currentVoice = { id, src, btnEl };
         } catch (e) { log('playback error: ' + e); }
+      }
+
+      function fmtDuration(ms) {
+        const s = Math.max(0, ms / 1000);
+        if (s < 60) return s.toFixed(1) + 's';
+        const m = Math.floor(s / 60);
+        const r = Math.floor(s % 60);
+        return `${m}:${r.toString().padStart(2, '0')}`;
+      }
+
+      const onVoice = (detail) => {
+        const { pcm, rate, from, to, channel, codec, duration_ms } = detail;
+        const fromHex = from.startsWith('0x') ? from.slice(2) : from;
+        const toHex = to.startsWith('0x') ? to.slice(2) : to;
+        const fromKey = '!' + fromHex;
+        const fromName = knownNodes.get(fromKey) || fromKey;
+        const voiceId = `v${++voiceSeq}`;
+        const voiceMsg = {
+          who: fromName,
+          kind: 'in voice',
+          voice: true,
+          voiceId,
+          pcm,
+          rate,
+          duration_ms,
+          codec,
+        };
+        // Same broadcast-vs-DM rule as routeIncoming for text.
+        if (toHex === 'ffffffff') {
+          const key = `channel:${channel}`;
+          const label = channel === 0 ? 'Broadcast — Channel 0' : `Channel ${channel}`;
+          ensureThread(key, label);
+          threads.get(key).messages.push(voiceMsg);
+          if (threadEl.value === key) renderChat();
+        } else if (myNodeHex && toHex === myNodeHex.slice(1)) {
+          const key = `node:${fromKey}`;
+          const label = `DM — ${fromName} (${fromKey})`;
+          ensureThread(key, label);
+          threads.get(key).messages.push(voiceMsg);
+          if (threadEl.value === key) renderChat();
+        } else {
+          log(`🎙️ voice from ${fromName} not addressed to us (to=${to})`);
+        }
+        log(`  ⏵ voice from ${fromName} ready (${fmtDuration(duration_ms)}, ${codec})`);
       };
 
       // ---- Mic capture ----
