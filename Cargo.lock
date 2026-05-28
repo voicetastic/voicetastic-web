@@ -1375,7 +1375,9 @@ dependencies = [
  "futures",
  "getrandom 0.4.2",
  "instant",
+ "js-sys",
  "nnnoiseless",
+ "opencore-amrnb-src",
  "opus-decoder",
  "parking_lot 0.12.5",
  "prost",
@@ -1387,6 +1389,8 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-time",
  "zbus",
 ]
@@ -1397,7 +1401,6 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
- "opencore-amrnb-src",
  "prost",
  "serde",
  "serde-wasm-bindgen",

@@ -12,14 +12,15 @@
 //! (Web Serial, framing, and ferrying events to a JS callback). That's the
 //! point of the sans-IO refactor: one protocol implementation, two drivers.
 
-mod amrnb;
 mod settings;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use prost::Message as _;
-use voicetastic_core::codec::{Denoiser, codec2_decode, codec2_encode, opus_decode};
+use voicetastic_core::codec::{
+    Denoiser, amrnb_decode, amrnb_encode, amrnb_init, codec2_decode, codec2_encode, opus_decode,
+};
 use voicetastic_core::node::NodeId;
 use voicetastic_core::ports::PRIVATE_APP;
 use voicetastic_core::proto::ToRadio;
@@ -203,7 +204,7 @@ impl Inner {
         let (payload, codec, codec_param) = match self.send_codec.get() {
             1 => {
                 let mode = self.amrnb_mode.get();
-                let bytes = amrnb::amrnb_encode(pcm_for_encode, in_rate, mode)
+                let bytes = amrnb_encode(pcm_for_encode, in_rate, mode)
                     .await
                     .map_err(|e| err(&format!("amrnb encode: {e:?}")))?;
                 (bytes, VoiceCodec::AmrNb, mode)
@@ -639,7 +640,7 @@ pub async fn connect(
     // operation doesn't pay the WebAssembly.instantiate latency. Errors are
     // logged but non-fatal — Codec2 paths still work without it.
     wasm_bindgen_futures::spawn_local(async {
-        if let Err(e) = amrnb::init().await {
+        if let Err(e) = amrnb_init().await {
             log(&format!("amrnb shim init failed: {e:?}"));
         }
     });
@@ -742,7 +743,7 @@ fn handle_voice(
                     let on_voice = on_voice.clone();
                     let from = from.clone();
                     wasm_bindgen_futures::spawn_local(async move {
-                        match amrnb::amrnb_decode(&payload).await {
+                        match amrnb_decode(&payload).await {
                             Ok((pcm, rate)) => {
                                 let arr = js_sys::Float32Array::from(pcm.as_slice());
                                 let _ = on_voice.call3(
