@@ -17,12 +17,15 @@ use std::rc::Rc;
 
 use prost::Message as _;
 use voicetastic_core::codec::{codec2_decode, codec2_encode};
+use voicetastic_core::node::NodeId;
 use voicetastic_core::ports::PRIVATE_APP;
 use voicetastic_core::proto::ToRadio;
 use voicetastic_core::protocol::{self, InboundCtx, InboundEvent, ProtocolState};
 use voicetastic_core::service::modem_preset_from_proto;
+use voicetastic_core::settings::api::VoiceFecMode;
 use voicetastic_core::voice::{
-    AssemblerConfig, AssemblyEvent, BuildConfig, VoiceAssembler, VoiceCodec, build_message,
+    AssemblerConfig, AssemblyEvent, BuildConfig, MAX_BODY_SIZE, ModemPreset, VoiceAssembler,
+    VoiceCodec, build_message,
     random_message_id, tx_policy,
 };
 use wasm_bindgen::JsCast;
@@ -31,11 +34,6 @@ use wasm_bindgen_futures::{JsFuture, future_to_promise};
 
 /// Codec2 @ 1200 bps — lowest airtime, best for LoRa (codec_param 5; core's codec::c2).
 const VOICE_CODEC_PARAM: u8 = 5;
-/// Codec payload bytes per wire frame. With ≤16 data chunks/message this caps a
-/// single message at ~16·128 bytes ≈ 13 s at 1200 bps (v1: one message, no FEC).
-const VOICE_CHUNK_SIZE: usize = 128;
-/// No Reed-Solomon parity in v1 (FEC/NACK retransmit stay native-only for now).
-const VOICE_PARITY: u8 = 0;
 /// Inter-frame pacing fallback before the radio's LoRa config is known.
 const DEFAULT_PACING_MS: u64 = 250;
 
@@ -137,13 +135,29 @@ impl Inner {
     async fn send_voice(&self, pcm: &[f32], in_rate: u32, channel: u32, to: Option<u32>) -> Result<(), JsValue> {
         let payload =
             codec2_encode(pcm, in_rate, VOICE_CODEC_PARAM).map_err(|e| err(&e.to_string()))?;
+        // chunk_size + FEC parity match the desktop's policy — both are derived
+        // from the radio's LoRa modem preset + destination via core helpers, so
+        // a clip sent from the browser is wire-equivalent to one sent from the
+        // GUI on the same radio. `VoiceFecMode::Auto` is desktop's default.
+        let preset = self
+            .state
+            .borrow()
+            .lora
+            .as_ref()
+            .and_then(|l| modem_preset_from_proto(l.modem_preset));
+        let chunk_size = preset
+            .map(ModemPreset::recommended_chunk_size)
+            .unwrap_or(MAX_BODY_SIZE);
+        let total_data = payload.len().div_ceil(chunk_size).max(1);
+        let broadcast = to.is_none();
+        let parity_count = VoiceFecMode::Auto.resolve(broadcast, preset, total_data);
         let cfg = BuildConfig {
             message_id: random_message_id().map_err(|e| err(&e.to_string()))?,
             stream_seq: 0,
             codec: VoiceCodec::Codec2,
             codec_param: VOICE_CODEC_PARAM,
-            chunk_size: VOICE_CHUNK_SIZE,
-            parity_count: VOICE_PARITY,
+            chunk_size,
+            parity_count,
             last_in_stream: true,
         };
         let msg = build_message(&payload, &cfg).map_err(|e| err(&format!("build_message: {e}")))?;
@@ -281,6 +295,13 @@ pub async fn connect(
             log(&format!("serial read loop ended: {e:?}"));
         }
     });
+    // Background NACK loop: drive VoiceAssembler::tick() periodically and
+    // forward the framed NACKs to senders, matching the desktop's RX-side
+    // reliability behaviour.
+    let nack_inner = inner.clone();
+    wasm_bindgen_futures::spawn_local(async move {
+        nack_tick_loop(nack_inner).await;
+    });
 
     // Kick off the config handshake using the core builder.
     let nonce = rand_u32();
@@ -389,6 +410,54 @@ fn handle_voice(
 
 fn emit(cb: &js_sys::Function, line: &str) {
     let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(line));
+}
+
+/// Drive `VoiceAssembler::tick()` periodically and emit any returned NACK
+/// frames back to the original sender. Mirrors the desktop GUI's RX-side
+/// reliability: the framing + retry-round bookkeeping lives in core, this
+/// loop just does the timer and the writes. Exits when only this task holds
+/// `inner` (the `WebClient` handle and the read loop have both dropped).
+async fn nack_tick_loop(inner: Rc<Inner>) {
+    const TICK_MS: i32 = 500;
+    loop {
+        sleep_ms(TICK_MS).await;
+        if Rc::strong_count(&inner) <= 1 {
+            return;
+        }
+        let out = inner.assembler.tick();
+        for nack in out.nacks {
+            let Ok(node) = nack.from.parse::<NodeId>() else {
+                log(&format!("nack: malformed sender id {:?}", nack.from));
+                continue;
+            };
+            let id = inner.alloc_id();
+            let pv = protocol::data_packet(
+                id,
+                PRIVATE_APP as i32,
+                nack.frame,
+                nack.channel,
+                Some(node.as_u32()),
+                false, // want_ack — NACK is a hint; if lost, the next round retries
+                false, // want_response
+            );
+            if let Err(e) = inner.write_payload(pv).await {
+                log(&format!("nack send failed: {e:?}"));
+                continue;
+            }
+            log(&format!(
+                "  ⟶ NACK round {} for msg 0x{:x} ({} missing) to {}",
+                nack.round, nack.message_id, nack.missing_count, nack.from
+            ));
+        }
+        for msg in out.finalized {
+            if !msg.is_complete {
+                log(&format!(
+                    "voice partial finalize from {} ({}/{} chunks)",
+                    msg.from, msg.received_data, msg.total_data
+                ));
+            }
+        }
+    }
 }
 
 /// One-line, JS-friendly description of an inbound event (for the demo UI).
