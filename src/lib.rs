@@ -12,6 +12,7 @@
 //! (Web Serial, framing, and ferrying events to a JS callback). That's the
 //! point of the sans-IO refactor: one protocol implementation, two drivers.
 
+mod amrnb;
 mod settings;
 
 use std::cell::{Cell, RefCell};
@@ -91,6 +92,13 @@ struct Inner {
     /// Codec2 mode (0..=5) for outgoing voice. Runtime-settable via
     /// `WebClient::setCodec2Mode`.
     codec_param: Cell<u8>,
+    /// Which codec to use for outgoing voice. Numeric so it crosses the
+    /// wasm-bindgen boundary directly: 0 = Codec2 (default), 1 = AMR-NB.
+    /// (Opus encode isn't available in the browser, see UI for details.)
+    send_codec: Cell<u8>,
+    /// AMR-NB mode (0..=7) for outgoing voice when send_codec == AMR-NB.
+    /// Default 5 = MR795 (7.95 kbps), matching the desktop GUI's default.
+    amrnb_mode: Cell<u8>,
 }
 
 impl Inner {
@@ -189,8 +197,24 @@ impl Inner {
         } else {
             pcm
         };
-        let payload =
-            codec2_encode(pcm_for_encode, in_rate, self.codec_param.get()).map_err(|e| err(&e.to_string()))?;
+        // Dispatch by the chosen send codec. Codec2 stays the LoRa-optimal
+        // default; AMR-NB is offered for interop with desktop/Android senders
+        // that prefer it. Both paths feed the same `build_message` framing.
+        let (payload, codec, codec_param) = match self.send_codec.get() {
+            1 => {
+                let mode = self.amrnb_mode.get();
+                let bytes = amrnb::amrnb_encode(pcm_for_encode, in_rate, mode)
+                    .await
+                    .map_err(|e| err(&format!("amrnb encode: {e:?}")))?;
+                (bytes, VoiceCodec::AmrNb, mode)
+            }
+            _ => {
+                let mode = self.codec_param.get();
+                let bytes = codec2_encode(pcm_for_encode, in_rate, mode)
+                    .map_err(|e| err(&e.to_string()))?;
+                (bytes, VoiceCodec::Codec2, mode)
+            }
+        };
         // chunk_size + FEC parity match the desktop's policy — both are derived
         // from the radio's LoRa modem preset + destination via core helpers, so
         // a clip sent from the browser is wire-equivalent to one sent from the
@@ -210,8 +234,8 @@ impl Inner {
         let cfg = BuildConfig {
             message_id: random_message_id().map_err(|e| err(&e.to_string()))?,
             stream_seq: 0,
-            codec: VoiceCodec::Codec2,
-            codec_param: self.codec_param.get(),
+            codec,
+            codec_param,
             chunk_size,
             parity_count,
             last_in_stream: true,
@@ -339,6 +363,27 @@ impl WebClient {
     #[wasm_bindgen(js_name = setCodec2Mode)]
     pub fn set_codec2_mode(&self, mode: u8) {
         self.inner.codec_param.set(mode.min(5));
+    }
+
+    /// Pick the codec for outgoing voice: `"codec2"` (default, LoRa-optimal)
+    /// or `"amrnb"` (Adaptive Multi-Rate Narrowband, for interop). Any other
+    /// value is ignored. Decode of inbound voice always works for all
+    /// supported codecs regardless of this setting.
+    #[wasm_bindgen(js_name = setSendCodec)]
+    pub fn set_send_codec(&self, codec: &str) {
+        let id: u8 = match codec {
+            "amrnb" | "amr-nb" | "AMR-NB" => 1,
+            _ => 0,
+        };
+        self.inner.send_codec.set(id);
+    }
+
+    /// AMR-NB mode (0..=7) when sending in AMR-NB. Mode → bitrate:
+    /// 0=4.75, 1=5.15, 2=5.9, 3=6.7, 4=7.4, 5=7.95 (default), 6=10.2, 7=12.2 kbps.
+    /// Takes effect on the next `sendVoice`. Out-of-range values are clamped.
+    #[wasm_bindgen(js_name = setAmrnbMode)]
+    pub fn set_amrnb_mode(&self, mode: u8) {
+        self.inner.amrnb_mode.set(mode.min(7));
     }
 
     /// Active node-discovery ping: broadcast our `User` on `NODEINFO_APP` with
@@ -571,6 +616,8 @@ pub async fn connect(
         queue_free: Cell::new(u32::MAX),
         denoise_enabled: Cell::new(true),
         codec_param: Cell::new(DEFAULT_CODEC2_MODE),
+        send_codec: Cell::new(0), // 0 = Codec2
+        amrnb_mode: Cell::new(5), // MR795
     });
 
     // Background inbound loop: read → deframe → core decode → core state/voice.
@@ -586,6 +633,15 @@ pub async fn connect(
     let nack_inner = inner.clone();
     wasm_bindgen_futures::spawn_local(async move {
         nack_tick_loop(nack_inner).await;
+    });
+
+    // Hand the vendored AMR-NB wasm to its JS shim so the first voice
+    // operation doesn't pay the WebAssembly.instantiate latency. Errors are
+    // logged but non-fatal — Codec2 paths still work without it.
+    wasm_bindgen_futures::spawn_local(async {
+        if let Err(e) = amrnb::init().await {
+            log(&format!("amrnb shim init failed: {e:?}"));
+        }
     });
 
     // Kick off the config handshake using the core builder.
@@ -674,30 +730,33 @@ fn handle_voice(
                     msg.total_data
                 ),
             );
-            // Dispatch by codec — Codec2 and Opus both have pure-Rust decoders
-            // in core (codec::c2 + codec::opus_d), AMR-NB needs the C lib that
-            // doesn't build for wasm.
-            let decoded = match msg.codec {
-                VoiceCodec::Codec2 => codec2_decode(&msg.audio, msg.codec_param),
-                VoiceCodec::Opus => opus_decode(&msg.audio, msg.codec_param),
-                other => {
-                    log(&format!(
-                        "voice: codec {other:?} not playable in browser (only Codec2 + Opus have pure-Rust decoders)"
-                    ));
-                    return;
+            // Dispatch by codec. Codec2/Opus have pure-Rust decoders in core;
+            // AMR-NB runs through the vendored emscripten wasm via a JS shim,
+            // which is async — so its branch spawns a local future and feeds
+            // the resulting PCM back to `on_voice` when it lands.
+            match msg.codec {
+                VoiceCodec::Codec2 => play_or_log(&codec2_decode(&msg.audio, msg.codec_param), on_voice, &from),
+                VoiceCodec::Opus => play_or_log(&opus_decode(&msg.audio, msg.codec_param), on_voice, &from),
+                VoiceCodec::AmrNb => {
+                    let payload = msg.audio.clone();
+                    let on_voice = on_voice.clone();
+                    let from = from.clone();
+                    wasm_bindgen_futures::spawn_local(async move {
+                        match amrnb::amrnb_decode(&payload).await {
+                            Ok((pcm, rate)) => {
+                                let arr = js_sys::Float32Array::from(pcm.as_slice());
+                                let _ = on_voice.call3(
+                                    &JsValue::NULL,
+                                    &arr,
+                                    &JsValue::from_f64(rate as f64),
+                                    &JsValue::from_str(&from),
+                                );
+                            }
+                            Err(e) => log(&format!("AMR-NB decode failed: {e:?}")),
+                        }
+                    });
                 }
-            };
-            match decoded {
-                Ok((pcm, rate)) => {
-                    let arr = js_sys::Float32Array::from(pcm.as_slice());
-                    let _ = on_voice.call3(
-                        &JsValue::NULL,
-                        &arr,
-                        &JsValue::from_f64(rate as f64),
-                        &JsValue::from_str(&from),
-                    );
-                }
-                Err(e) => log(&format!("voice decode failed: {e}")),
+                other => log(&format!("voice: codec {other:?} not playable in browser")),
             }
         }
         AssemblyEvent::Pending {
@@ -756,6 +815,27 @@ fn handle_voice(
 
 fn emit(cb: &js_sys::Function, line: &str) {
     let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(line));
+}
+
+/// Hand a freshly-decoded PCM block to the JS playback callback, or log the
+/// codec error if decode failed. Shared by the Codec2 and Opus decode arms.
+fn play_or_log(
+    decoded: &Result<(Vec<f32>, u32), voicetastic_core::codec::CodecError>,
+    on_voice: &js_sys::Function,
+    from: &str,
+) {
+    match decoded {
+        Ok((pcm, rate)) => {
+            let arr = js_sys::Float32Array::from(pcm.as_slice());
+            let _ = on_voice.call3(
+                &JsValue::NULL,
+                &arr,
+                &JsValue::from_f64(*rate as f64),
+                &JsValue::from_str(from),
+            );
+        }
+        Err(e) => log(&format!("voice decode failed: {e}")),
+    }
 }
 
 /// Render a `VoiceDestination` as the same `0x...`-hex format we use for

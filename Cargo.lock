@@ -709,6 +709,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "opencore-amrnb-src"
+version = "0.0.0-git"
+
+[[package]]
 name = "opus-decoder"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1393,6 +1397,7 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
+ "opencore-amrnb-src",
  "prost",
  "serde",
  "serde-wasm-bindgen",

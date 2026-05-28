@@ -17,6 +17,11 @@ crate-type = ["cdylib", "rlib"]
 # via the wasm-safe `codec2` feature — no Opus/C deps). No native transports/
 # tokio (default-features off). Path dep for now; switch to a git dep later.
 voicetastic-core = { path = "../voicetastic-desktop/crates/voicetastic-core", default-features = false, features = ["codec2", "denoise", "opus-decode"] }
+# Vendored opencore-amr-nb built to a standalone wasm by emscripten — the
+# browser's AMR-NB encode/decode path. Path dep so the build artifact lives
+# alongside the other core crates; the wasm bytes are baked into our wasm
+# via include_bytes! and re-instantiated at runtime through a JS shim.
+opencore-amrnb-src = { path = "../voicetastic-desktop/crates/opencore-amrnb-src" }
 
 # Same prost as core (0.14) so the generated `proto` types share one trait impl.
 prost = "0.14"

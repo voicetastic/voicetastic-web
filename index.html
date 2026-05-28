@@ -429,12 +429,12 @@
             </div>
             <label for="send-codec">Send codec</label>
             <select id="send-codec" disabled>
-              <option value="codec2">Codec2 (pure Rust, the only wasm-buildable encoder)</option>
-              <option value="amrnb" disabled>AMR-NB (encoder unavailable in browser)</option>
-              <option value="opus" disabled>Opus (encoder unavailable in browser)</option>
+              <option value="codec2">Codec2 — LoRa-optimal, pure Rust</option>
+              <option value="amrnb">AMR-NB — interop w/ desktop/Android, opencore-amr via emscripten</option>
+              <option value="opus" disabled>Opus — encoder unavailable in browser</option>
             </select>
-            <label for="codec-mode">Codec2 mode</label>
-            <select id="codec-mode" disabled>
+            <label for="codec-mode" data-codec="codec2">Codec2 mode</label>
+            <select id="codec-mode" data-codec="codec2" disabled>
               <option value="0">3200 bps — best quality (default)</option>
               <option value="1">2400 bps</option>
               <option value="2">1600 bps</option>
@@ -442,10 +442,21 @@
               <option value="4">1300 bps</option>
               <option value="5">1200 bps — lowest airtime</option>
             </select>
+            <label for="amrnb-mode" data-codec="amrnb" hidden>AMR-NB mode</label>
+            <select id="amrnb-mode" data-codec="amrnb" disabled hidden>
+              <option value="0">MR475 — 4.75 kbps</option>
+              <option value="1">MR515 — 5.15 kbps</option>
+              <option value="2">MR59 — 5.9 kbps</option>
+              <option value="3">MR67 — 6.7 kbps</option>
+              <option value="4">MR74 — 7.4 kbps</option>
+              <option value="5" selected>MR795 — 7.95 kbps (default)</option>
+              <option value="6">MR102 — 10.2 kbps</option>
+              <option value="7">MR122 — 12.2 kbps</option>
+            </select>
             <label>Playback support</label>
             <div class="muted" style="font-size:0.85rem;">
-              ✓ Codec2 &nbsp;·&nbsp; ✓ Opus (via pure-Rust <code>opus-decoder</code>)
-              &nbsp;·&nbsp; ✗ AMR-NB (needs C lib that doesn't build for wasm)
+              ✓ Codec2 &nbsp;·&nbsp; ✓ Opus (pure-Rust <code>opus-decoder</code>)
+              &nbsp;·&nbsp; ✓ AMR-NB (opencore-amr → emscripten standalone wasm)
             </div>
           </div>
         </details>
@@ -476,7 +487,9 @@
       const recBtn = document.getElementById('record');
       const recTimer = document.getElementById('rectimer');
       const denoiseEl = document.getElementById('denoise');
+      const sendCodecEl = document.getElementById('send-codec');
       const codecModeEl = document.getElementById('codec-mode');
+      const amrnbModeEl = document.getElementById('amrnb-mode');
       const discoverBtn = document.getElementById('discover');
       const threadEl = document.getElementById('chat-thread');
       const chatEl = document.getElementById('chat-messages');
@@ -768,7 +781,10 @@
             sendBtn.disabled = false;
             recBtn.disabled = false;
             denoiseEl.disabled = false;
+            sendCodecEl.disabled = false;
             codecModeEl.disabled = false;
+            amrnbModeEl.disabled = false;
+            refreshCodecRows();
             discoverBtn.hidden = false; // visible once connected, enabled at Ready
             settingsRefreshBtn.disabled = false;
             renderChat(); // refresh placeholder text
@@ -812,6 +828,28 @@
           client.setCodec2Mode(mode);
           log(`codec2 mode set to ${codecModeEl.options[codecModeEl.selectedIndex].text}`);
         };
+
+        amrnbModeEl.onchange = () => {
+          if (!client) return;
+          const mode = parseInt(amrnbModeEl.value, 10);
+          client.setAmrnbMode(mode);
+          log(`AMR-NB mode set to ${amrnbModeEl.options[amrnbModeEl.selectedIndex].text}`);
+        };
+
+        sendCodecEl.onchange = () => {
+          if (!client) return;
+          client.setSendCodec(sendCodecEl.value);
+          log(`send codec set to ${sendCodecEl.value}`);
+          refreshCodecRows();
+        };
+
+        // Show only the mode dropdown for the currently-selected send codec.
+        function refreshCodecRows() {
+          const which = sendCodecEl.value;
+          for (const el of document.querySelectorAll('[data-codec]')) {
+            el.hidden = el.dataset.codec !== which;
+          }
+        }
 
         recBtn.onclick = async () => {
           try { if (recording) await stopRecording(); else await startRecording(); }
