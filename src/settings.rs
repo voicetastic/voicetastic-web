@@ -190,11 +190,15 @@ fn device_to_dto(c: &config::DeviceConfig) -> DeviceDto {
 }
 
 fn position_to_dto(c: &config::PositionConfig) -> PositionDto {
+    // `gps_enabled` (bool) was superseded by `gps_mode` (enum: Disabled,
+    // Enabled, NotPresent) in firmware. The DTO surface still exposes a
+    // bool for JS simplicity — true iff gps_mode == Enabled.
+    let gps_enabled = c.gps_mode == config::position_config::GpsMode::Enabled as i32;
     PositionDto {
         position_broadcast_secs: c.position_broadcast_secs,
         position_broadcast_smart_enabled: c.position_broadcast_smart_enabled,
         fixed_position: c.fixed_position,
-        gps_enabled: c.gps_enabled,
+        gps_enabled,
         gps_update_interval: c.gps_update_interval,
         broadcast_smart_minimum_distance: c.broadcast_smart_minimum_distance,
         broadcast_smart_minimum_interval_secs: c.broadcast_smart_minimum_interval_secs,
@@ -327,11 +331,19 @@ pub(crate) fn position_payload(
     dto: PositionDto,
 ) -> admin_message::PayloadVariant {
     let base = state.position.unwrap_or_default();
+    // Translate the DTO's bool back to gps_mode. The legacy `gps_enabled`
+    // bool isn't set explicitly — `..base` carries whatever the radio
+    // last reported, and firmware reads gps_mode regardless.
+    let gps_mode = if dto.gps_enabled {
+        config::position_config::GpsMode::Enabled as i32
+    } else {
+        config::position_config::GpsMode::Disabled as i32
+    };
     let updated = config::PositionConfig {
         position_broadcast_secs: dto.position_broadcast_secs,
         position_broadcast_smart_enabled: dto.position_broadcast_smart_enabled,
         fixed_position: dto.fixed_position,
-        gps_enabled: dto.gps_enabled,
+        gps_mode,
         gps_update_interval: dto.gps_update_interval,
         broadcast_smart_minimum_distance: dto.broadcast_smart_minimum_distance,
         broadcast_smart_minimum_interval_secs: dto.broadcast_smart_minimum_interval_secs,
