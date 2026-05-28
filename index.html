@@ -4,11 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
-    <title>Voicetastic Web — voice + text</title>
+    <title>Voicetastic Web</title>
     <style>
-      /* Color tokens mirror the site's `[color.dark_hc]` (Android Neutral
-         + HighContrast Material 3, seed #FFBDA8). Keep in sync with
-         site/src/layouts/Layout.astro and tokens/design.toml. */
+      /* Tokens mirror site/src/layouts/Layout.astro. */
       :root {
         --bg: #100e0d;
         --bg-elevated: #161312;
@@ -21,188 +19,192 @@
         --accent: #ffdfd5;
         --accent-strong: #ffffff;
         --accent-on: #482113;
-        --accent-glow: rgba(210, 149, 130, 0.32);
         --danger: #ffdedb;
+        --ok: #a0e4a4;
+        --warn: #f5c87a;
         --max-width: 1100px;
         --radius: 12px;
         --radius-sm: 8px;
         font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue',
           Arial, 'Noto Sans', sans-serif;
       }
-
       * { box-sizing: border-box; }
       html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); line-height: 1.6; }
       a { color: var(--accent); text-decoration: none; }
       a:hover { color: var(--accent-strong); text-decoration: underline; }
+      code { background: var(--bg-card); padding: 0.05rem 0.35rem; border-radius: 4px; font-size: 0.9em; }
       .muted { color: var(--text-muted); }
 
-      /* ----- Site-style navbar ----- */
+      /* ----- Navbar (matches site) ----- */
       .site-header {
-        position: sticky;
-        top: 0;
-        z-index: 10;
+        position: sticky; top: 0; z-index: 10;
         background: rgba(16, 14, 13, 0.85);
         backdrop-filter: saturate(150%) blur(8px);
         border-bottom: 1px solid var(--border);
       }
       .nav {
-        max-width: var(--max-width);
-        margin: 0 auto;
+        max-width: var(--max-width); margin: 0 auto;
         padding: 1.125rem 1.25rem;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
+        display: flex; align-items: center; justify-content: space-between;
       }
       .brand {
-        display: flex;
-        align-items: center;
-        gap: 0.6875rem;
-        color: var(--text);
-        font-weight: 700;
-        font-size: 1.3125rem;
+        display: flex; align-items: center; gap: 0.6875rem;
+        color: var(--text); font-weight: 700; font-size: 1.3125rem;
       }
       .brand:hover { text-decoration: none; }
       .brand-mark { width: 2.1875rem; height: 2.1875rem; border-radius: 6px; display: block; }
-      .brand-tag {
-        font-weight: 500;
-        font-size: 0.85rem;
-        color: var(--text-muted);
-        margin-left: 0.25rem;
-      }
+      .brand-tag { font-weight: 500; font-size: 0.85rem; color: var(--text-muted); margin-left: 0.25rem; }
       .nav-links {
-        list-style: none;
-        padding: 0;
-        margin: 0;
-        display: flex;
-        gap: 1.25rem;
-        align-items: center;
+        list-style: none; padding: 0; margin: 0;
+        display: flex; gap: 1.1rem; align-items: center;
       }
       .nav-links a {
-        color: var(--text-muted);
-        font-size: 0.95rem;
+        color: var(--text-muted); font-size: 0.95rem;
+        padding-bottom: 2px; border-bottom: 2px solid transparent;
       }
-      .nav-links a:hover {
+      .nav-links a:hover { color: var(--text); text-decoration: none; }
+      .nav-links a.active {
         color: var(--text);
-        text-decoration: none;
+        border-bottom-color: var(--accent);
       }
-      /* Connection status pill */
+      .nav-sep { width: 1px; height: 1.1rem; background: var(--border); }
       .status-pill {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.4rem;
-        padding: 0.2rem 0.65rem;
-        border-radius: 999px;
-        background: var(--bg-card);
-        border: 1px solid var(--border);
-        font-size: 0.8rem;
-        color: var(--text-muted);
+        display: inline-flex; align-items: center; gap: 0.4rem;
+        padding: 0.2rem 0.65rem; border-radius: 999px;
+        background: var(--bg-card); border: 1px solid var(--border);
+        font-size: 0.8rem; color: var(--text-muted);
       }
       .status-pill::before {
-        content: '';
-        display: inline-block;
-        width: 0.5rem;
-        height: 0.5rem;
-        border-radius: 50%;
-        background: var(--text-muted);
+        content: ''; display: inline-block; width: 0.5rem; height: 0.5rem;
+        border-radius: 50%; background: var(--text-muted);
       }
-      .status-pill.connecting::before { background: #f5c87a; }
-      .status-pill.connecting { color: #f5c87a; border-color: rgba(245, 200, 122, 0.4); }
-      .status-pill.ready::before { background: #a0e4a4; }
-      .status-pill.ready { color: #a0e4a4; border-color: rgba(160, 228, 164, 0.4); }
+      .status-pill.connecting::before { background: var(--warn); }
+      .status-pill.connecting { color: var(--warn); border-color: rgba(245, 200, 122, 0.4); }
+      .status-pill.ready::before { background: var(--ok); }
+      .status-pill.ready { color: var(--ok); border-color: rgba(160, 228, 164, 0.4); }
       .status-pill.error::before { background: var(--danger); }
       .status-pill.error { color: var(--danger); border-color: rgba(255, 222, 219, 0.4); }
 
-      /* Hamburger (mirrors site) */
       .nav-toggle {
-        display: none;
-        flex-direction: column;
-        justify-content: center;
-        gap: 5px;
-        width: 2.75rem;
-        height: 2.75rem;
-        padding: 0;
-        background: transparent;
-        border: 1px solid var(--border);
-        border-radius: var(--radius-sm);
-        cursor: pointer;
+        display: none; flex-direction: column; justify-content: center; gap: 5px;
+        width: 2.75rem; height: 2.75rem; padding: 0;
+        background: transparent; border: 1px solid var(--border);
+        border-radius: var(--radius-sm); cursor: pointer;
       }
-      .nav-toggle-bar {
-        display: block;
-        width: 1.25rem;
-        height: 2px;
-        margin: 0 auto;
-        background: var(--text);
-        border-radius: 2px;
-        transition: transform 0.2s ease, opacity 0.2s ease;
-      }
+      .nav-toggle-bar { display: block; width: 1.25rem; height: 2px; margin: 0 auto;
+        background: var(--text); border-radius: 2px;
+        transition: transform 0.2s ease, opacity 0.2s ease; }
       .nav-toggle[aria-expanded='true'] .nav-toggle-bar:nth-child(1) { transform: translateY(7px) rotate(45deg); }
       .nav-toggle[aria-expanded='true'] .nav-toggle-bar:nth-child(2) { opacity: 0; }
       .nav-toggle[aria-expanded='true'] .nav-toggle-bar:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
 
-      @media (max-width: 640px) {
+      @media (max-width: 740px) {
         .nav { flex-wrap: wrap; }
         .nav-toggle { display: flex; }
+        .nav-sep { display: none; }
         .nav-links {
-          flex-basis: 100%;
-          flex-direction: column;
-          align-items: stretch;
-          gap: 0;
-          max-height: 0;
-          overflow: hidden;
+          flex-basis: 100%; flex-direction: column; align-items: stretch;
+          gap: 0; max-height: 0; overflow: hidden;
           transition: max-height 0.25s ease;
         }
-        .nav-links.open { max-height: 22rem; margin-top: 0.75rem; }
+        .nav-links.open { max-height: 30rem; margin-top: 0.75rem; }
         .nav-links li { border-top: 1px solid var(--border); }
         .nav-links a { display: block; padding: 0.85rem 0.25rem; font-size: 1rem; }
+        .nav-links a.active { border-bottom-color: transparent; color: var(--accent); }
         .nav-links .status-pill { margin-top: 0.65rem; align-self: flex-start; }
       }
 
-      /* ----- Main content ----- */
+      /* ----- Page shell ----- */
       main {
-        max-width: 44rem;
-        margin: 2.5rem auto;
-        padding: 0 1.25rem;
+        max-width: var(--max-width);
+        margin: 0 auto;
+        padding: 2rem 1.25rem 3rem;
       }
-      h1.lead-title {
+      .page { display: none; }
+      .page.active { display: block; }
+      .page h1 {
         font-size: clamp(1.4rem, 3vw, 1.8rem);
         margin: 0 0 0.4rem;
       }
-      .lead {
-        color: var(--text-muted);
-        font-size: 0.95rem;
-        margin: 0 0 1.5rem;
-      }
+      .lead { color: var(--text-muted); font-size: 0.95rem; margin: 0 0 1.5rem; max-width: 40rem; }
 
+      /* ----- Cards / panels ----- */
+      .card {
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 1.1rem 1.25rem;
+        margin-top: 1rem;
+      }
+      .card h3 { margin: 0 0 0.5rem; font-size: 1rem; }
+
+      /* ----- Form controls ----- */
       button {
-        font-size: 1rem;
-        padding: 0.6rem 1.1rem;
+        font-size: 1rem; padding: 0.6rem 1.1rem;
         border-radius: var(--radius);
         border: 1px solid var(--border);
-        background: var(--accent);
-        color: var(--accent-on);
-        font-weight: 600;
-        cursor: pointer;
-        transition: transform 0.05s ease, border-color 0.15s ease;
+        background: var(--accent); color: var(--accent-on);
+        font-weight: 600; cursor: pointer;
+        transition: border-color 0.15s ease;
       }
       button:hover { border-color: var(--accent); }
       button:disabled { opacity: 0.5; cursor: default; }
       button.rec { background: #ffb4a8; }
+      button.ghost {
+        background: var(--bg-card); color: var(--text);
+        border: 1px solid var(--border);
+      }
+      button.ghost:hover { border-color: var(--accent); }
 
-      input[type='text'] {
-        font-size: 1rem;
-        padding: 0.55rem 0.7rem;
+      select, input[type='text'] {
+        font-size: 1rem; padding: 0.55rem 0.7rem;
         border-radius: var(--radius-sm);
         border: 1px solid var(--border);
-        background: var(--bg-card);
-        color: var(--text);
-        flex: 1;
+        background: var(--bg-card); color: var(--text);
       }
-      input[type='text']:focus { outline: none; border-color: var(--accent); }
+      input[type='text'] { flex: 1; min-width: 0; }
+      input[type='text']:focus, select:focus { outline: none; border-color: var(--accent); }
 
       .row { display: flex; gap: 0.5rem; margin-top: 1rem; align-items: center; flex-wrap: wrap; }
 
+      /* ----- Chat ----- */
+      .chat-shell {
+        margin-top: 1rem;
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        display: flex;
+        flex-direction: column;
+        height: 60vh;
+        min-height: 22rem;
+      }
+      .chat-header {
+        display: flex; align-items: center; gap: 0.6rem;
+        padding: 0.8rem 1rem; border-bottom: 1px solid var(--border);
+      }
+      .chat-header label { font-size: 0.85rem; color: var(--text-muted); }
+      .chat-messages {
+        flex: 1; overflow-y: auto;
+        padding: 0.9rem 1rem;
+        display: flex; flex-direction: column; gap: 0.55rem;
+        font-size: 0.95rem;
+      }
+      .chat-messages .placeholder { color: var(--text-muted); font-style: italic; }
+      .msg { display: flex; gap: 0.5rem; align-items: baseline; }
+      .msg .who {
+        font-size: 0.75rem; color: var(--text-muted); white-space: nowrap;
+        font-family: ui-monospace, monospace;
+      }
+      .msg.out .who { color: var(--accent); }
+      .msg.system .who { color: var(--warn); }
+      .msg .body { word-break: break-word; }
+      .msg.voice .body::before { content: '🎙️ '; }
+      .chat-input { display: flex; gap: 0.5rem; padding: 0.75rem 1rem; border-top: 1px solid var(--border); align-items: center; flex-wrap: wrap; }
+      .chat-input .grow { flex: 1; min-width: 12rem; display: flex; gap: 0.5rem; }
+
+      /* ----- Event log (Connect page) ----- */
       #log {
-        margin-top: 1.5rem;
+        margin-top: 1.25rem;
         padding: 1rem;
         border: 1px solid var(--border);
         border-radius: var(--radius);
@@ -210,15 +212,28 @@
         font-family: ui-monospace, monospace;
         font-size: 0.85rem;
         white-space: pre-wrap;
-        max-height: 24rem;
+        max-height: 22rem;
         overflow-y: auto;
+      }
+
+      /* ----- Map placeholder ----- */
+      .map-stub {
+        margin-top: 1rem;
+        height: 60vh; min-height: 22rem;
+        border: 1px dashed var(--border);
+        border-radius: var(--radius);
+        background:
+          radial-gradient(circle at 50% 40%, rgba(255, 223, 213, 0.06), transparent 60%),
+          var(--bg-card);
+        display: flex; align-items: center; justify-content: center;
+        color: var(--text-muted); font-style: italic;
       }
     </style>
   </head>
   <body>
     <header class="site-header">
       <nav class="nav">
-        <a href="./" class="brand">
+        <a href="#/connect" class="brand">
           <img src="./favicon.svg" alt="" class="brand-mark" width="35" height="35" />
           <span>Voicetastic</span>
           <span class="brand-tag">web</span>
@@ -234,6 +249,11 @@
           <span class="nav-toggle-bar"></span>
         </button>
         <ul class="nav-links" id="nav-links">
+          <li><a href="#/connect" data-route="connect">Connect</a></li>
+          <li><a href="#/chat" data-route="chat">Chat</a></li>
+          <li><a href="#/settings" data-route="settings">Settings</a></li>
+          <li><a href="#/map" data-route="map">Map</a></li>
+          <li class="nav-sep" aria-hidden="true"></li>
           <li>
             <a
               href="https://git.cha-sam.re/voicetastic/voicetastic-desktop/-/wikis/Home"
@@ -251,47 +271,111 @@
     </header>
 
     <main>
-      <h1 class="lead-title">Voice + text over Meshtastic, in your browser</h1>
-      <p class="lead">
-        Plug in a Meshtastic radio over USB and Connect. Text and voice both run
-        <code>voicetastic-core</code>'s protocol core in the browser — Codec2 (pure
-        Rust) for voice, decoded and played back here. Chrome/Edge or Firefox 151+
-        over localhost/HTTPS; voice also needs mic permission.
-      </p>
+      <!-- ============================== CONNECT ============================== -->
+      <section id="page-connect" class="page">
+        <h1>Connect your radio</h1>
+        <p class="lead">
+          Plug in a Meshtastic radio over USB. Text and voice both run
+          <code>voicetastic-core</code>'s protocol core in the browser — Codec2 (pure
+          Rust) for voice, RNNoise for capture-side denoise. Chrome/Edge or
+          Firefox&nbsp;151+ over <code>localhost</code> or HTTPS; voice also needs
+          mic permission.
+        </p>
+        <div class="row">
+          <button id="connect">Connect</button>
+          <span id="connect-hint" class="muted">Click Connect, then pick the serial port.</span>
+        </div>
+        <div id="info" class="card" hidden>
+          <h3>Device</h3>
+          <div class="muted" id="info-body">Waiting for config…</div>
+        </div>
+        <div id="log" class="muted">Idle.</div>
+      </section>
 
-      <button id="connect">Connect</button>
+      <!-- ================================ CHAT ================================ -->
+      <section id="page-chat" class="page">
+        <h1>Chat</h1>
+        <p class="lead">
+          Send and receive text and voice over the mesh. Pick a channel for broadcast
+          or a node for direct messages. Threads are populated as the radio reports
+          channels and node info.
+        </p>
+        <div class="chat-shell">
+          <div class="chat-header">
+            <label for="chat-thread">Thread:</label>
+            <select id="chat-thread">
+              <option value="channel:0">Broadcast — Channel 0</option>
+            </select>
+            <span style="flex:1"></span>
+            <label class="muted" style="display:flex; align-items:center; gap:0.35rem;">
+              <input id="denoise" type="checkbox" checked disabled />
+              Noise suppression
+            </label>
+          </div>
+          <div id="chat-messages" class="chat-messages">
+            <div class="placeholder">Connect a radio to start chatting.</div>
+          </div>
+          <div class="chat-input">
+            <div class="grow">
+              <input id="text" type="text" placeholder="Type a message…" disabled />
+              <button id="send" disabled>Send</button>
+            </div>
+            <button id="record" class="ghost" disabled>🎙 Record</button>
+            <span id="rectimer" class="muted"></span>
+          </div>
+        </div>
+      </section>
 
-      <div class="row">
-        <input id="text" type="text" placeholder="broadcast a text message…" disabled />
-        <button id="send" disabled>Send text</button>
-      </div>
+      <!-- ============================== SETTINGS ============================== -->
+      <section id="page-settings" class="page">
+        <h1>Settings</h1>
+        <p class="lead">
+          Device configuration — LoRa, Device, Position, Power, Network, Display,
+          Bluetooth, Channels, Owner. Read-only for now; live writes will land in a
+          follow-up.
+        </p>
+        <div class="card">
+          <h3>Coming soon</h3>
+          <p class="muted" style="margin:0">
+            All read-side state already flows through
+            <code>voicetastic_core::protocol::ProtocolState</code>; the panels just
+            need to be wired up. Track progress in the project source.
+          </p>
+        </div>
+      </section>
 
-      <div class="row">
-        <button id="record" disabled>🎙 Record</button>
-        <span id="rectimer" class="muted"></span>
-        <label class="muted" style="display:flex; align-items:center; gap:0.35rem;">
-          <input id="denoise" type="checkbox" checked disabled />
-          Noise suppression
-        </label>
-      </div>
-
-      <div id="log" class="muted">Idle.</div>
+      <!-- ================================= MAP ================================= -->
+      <section id="page-map" class="page">
+        <h1>Map</h1>
+        <p class="lead">
+          Mesh map view — known nodes plotted by reported position. Placeholder for now.
+        </p>
+        <div class="map-stub">Map view coming soon.</div>
+      </section>
     </main>
 
     <script type="module">
       import init, { connect } from './pkg/voicetastic_web.js';
 
+      // ---- DOM refs ----
+      const statusEl = document.getElementById('status');
       const logEl = document.getElementById('log');
       const connectBtn = document.getElementById('connect');
+      const connectHint = document.getElementById('connect-hint');
+      const infoCard = document.getElementById('info');
+      const infoBody = document.getElementById('info-body');
       const textEl = document.getElementById('text');
       const sendBtn = document.getElementById('send');
       const recBtn = document.getElementById('record');
       const recTimer = document.getElementById('rectimer');
       const denoiseEl = document.getElementById('denoise');
-      const statusEl = document.getElementById('status');
+      const threadEl = document.getElementById('chat-thread');
+      const chatEl = document.getElementById('chat-messages');
+
       let client = null;
       let playCtx = null;
 
+      // ---- Helpers ----
       const setStatus = (text, kind) => {
         statusEl.textContent = text;
         statusEl.className = 'status-pill' + (kind ? ' ' + kind : '');
@@ -301,60 +385,202 @@
         logEl.classList.remove('muted');
         logEl.textContent += (logEl.textContent === 'Idle.' ? '' : '\n') + line;
         logEl.scrollTop = logEl.scrollHeight;
-        // Pick up READY from the ConfigComplete event line.
-        if (line.includes('ConfigComplete')) setStatus('Ready', 'ready');
       };
 
-      // ---- responsive nav toggle (mirrors site) ----
+      // ---- Routing (hash-based) ----
+      const ROUTES = ['connect', 'chat', 'settings', 'map'];
+      function route() {
+        const m = location.hash.match(/^#\/([a-z]+)/);
+        const r = m && ROUTES.includes(m[1]) ? m[1] : 'connect';
+        for (const id of ROUTES) {
+          document.getElementById('page-' + id).classList.toggle('active', id === r);
+        }
+        for (const a of document.querySelectorAll('.nav-links a[data-route]')) {
+          a.classList.toggle('active', a.dataset.route === r);
+        }
+      }
+      window.addEventListener('hashchange', route);
+      if (!location.hash) location.hash = '#/connect';
+      route();
+
+      // ---- Nav hamburger ----
       const navToggle = document.querySelector('.nav-toggle');
       const navLinks = document.getElementById('nav-links');
       navToggle?.addEventListener('click', () => {
-        const open = navLinks?.classList.toggle('open');
+        const open = navLinks.classList.toggle('open');
         navToggle.setAttribute('aria-expanded', String(open));
       });
-      navLinks?.querySelectorAll('a').forEach((a) =>
+      navLinks.querySelectorAll('a').forEach((a) =>
         a.addEventListener('click', () => {
           navLinks.classList.remove('open');
           navToggle?.setAttribute('aria-expanded', 'false');
         }),
       );
 
-      // ---- voice playback (called from Rust with decoded PCM) ----
+      // ---- Chat thread bookkeeping (parsed from event stream for v1) ----
+      // dest key → { label, messages: [{who, body, kind}] }
+      const threads = new Map();
+      const knownChannels = new Map(); // index → name
+      const knownNodes = new Map(); // "!hex" → name
+      let myNodeNum = null;
+      let myNodeHex = null;
+      let fwVersion = null;
+
+      function ensureThread(key, label) {
+        if (!threads.has(key)) {
+          threads.set(key, { label, messages: [] });
+          const opt = document.createElement('option');
+          opt.value = key;
+          opt.textContent = label;
+          threadEl.appendChild(opt);
+        } else if (label && threads.get(key).label !== label) {
+          // Rename if we learned a better label.
+          threads.get(key).label = label;
+          for (const opt of threadEl.options) {
+            if (opt.value === key) opt.textContent = label;
+          }
+        }
+      }
+      // Seed broadcast Ch 0 (already in HTML as default option).
+      threads.set('channel:0', { label: 'Broadcast — Channel 0', messages: [] });
+
+      function renderChat() {
+        const key = threadEl.value;
+        const t = threads.get(key);
+        chatEl.innerHTML = '';
+        if (!t || t.messages.length === 0) {
+          const ph = document.createElement('div');
+          ph.className = 'placeholder';
+          ph.textContent = client ? 'No messages yet in this thread.' : 'Connect a radio to start chatting.';
+          chatEl.appendChild(ph);
+          return;
+        }
+        for (const m of t.messages) {
+          const row = document.createElement('div');
+          row.className = 'msg' + (m.kind ? ' ' + m.kind : '');
+          const who = document.createElement('span'); who.className = 'who'; who.textContent = m.who;
+          const body = document.createElement('span'); body.className = 'body'; body.textContent = m.body;
+          row.appendChild(who); row.appendChild(body);
+          chatEl.appendChild(row);
+        }
+        chatEl.scrollTop = chatEl.scrollHeight;
+      }
+      threadEl.addEventListener('change', renderChat);
+
+      function pushMessage(threadKey, threadLabel, who, body, kind) {
+        ensureThread(threadKey, threadLabel);
+        threads.get(threadKey).messages.push({ who, body, kind });
+        if (threadEl.value === threadKey) renderChat();
+      }
+
+      function updateInfoCard() {
+        if (myNodeNum == null) {
+          infoBody.textContent = 'Waiting for config…';
+        } else {
+          infoBody.innerHTML =
+            `Node <code>${myNodeHex}</code> (${myNodeNum})<br>` +
+            (fwVersion ? `Firmware <code>${fwVersion}</code><br>` : '') +
+            `${knownChannels.size} channel(s), ${knownNodes.size} node(s) known`;
+        }
+        infoCard.hidden = false;
+      }
+
+      // Parse one core event-summary line (e.g. "🎙️ voice complete from !abcd")
+      // and route it to the right place. The richer events get structured tags
+      // for the chat view; everything still flows to the Connect-page log.
+      function handleEvent(line) {
+        log('  ⟵ ' + line);
+
+        // MyNodeInfo
+        let m = line.match(/^MyNodeInfo node_num=0x([0-9a-f]+)/);
+        if (m) {
+          myNodeNum = parseInt(m[1], 16);
+          myNodeHex = '!' + m[1];
+          updateInfoCard();
+          return;
+        }
+        // Metadata
+        m = line.match(/^Metadata fw=(\S+)/);
+        if (m) { fwVersion = m[1]; updateInfoCard(); return; }
+        // Channel[N] (total: M)
+        m = line.match(/^Channel\[(\d+)\]/);
+        if (m) {
+          const idx = parseInt(m[1], 10);
+          knownChannels.set(idx, `Channel ${idx}`);
+          ensureThread(`channel:${idx}`, idx === 0 ? 'Broadcast — Channel 0' : `Channel ${idx}`);
+          updateInfoCard();
+          return;
+        }
+        // NodeInfo 0xHEX "name" (known nodes: N)
+        m = line.match(/^NodeInfo 0x([0-9a-f]+) "([^"]*)"/);
+        if (m) {
+          const hex = '!' + m[1];
+          const name = m[2] || hex;
+          knownNodes.set(hex, name);
+          // Only create a DM thread for nodes that aren't us.
+          if (hex !== myNodeHex) ensureThread(`node:${hex}`, `DM — ${name} (${hex})`);
+          updateInfoCard();
+          return;
+        }
+        // ConfigComplete
+        if (line.includes('ConfigComplete')) {
+          setStatus('Ready', 'ready');
+          connectHint.textContent = 'Connected and configured. Go to Chat to start talking.';
+          return;
+        }
+        // 💬 text from 0xHEX: body
+        m = line.match(/^💬 text from 0x([0-9a-f]+): (.*)$/);
+        if (m) {
+          const fromHex = '!' + m[1];
+          const fromName = knownNodes.get(fromHex) || fromHex;
+          // For v1, all inbound texts land on Broadcast Ch 0 (the protocol
+          // does include a channel but the event summary doesn't carry it).
+          pushMessage('channel:0', 'Broadcast — Channel 0', fromName, m[2], 'in');
+          return;
+        }
+        // 🎙️ voice complete from !HEX (N chunks)
+        m = line.match(/^🎙️ voice complete from (\S+) \((\d+) chunks?\)/);
+        if (m) {
+          const fromHex = m[1];
+          const fromName = knownNodes.get(fromHex) || fromHex;
+          pushMessage(
+            'channel:0',
+            'Broadcast — Channel 0',
+            fromName,
+            `(voice, ${m[2]} chunks)`,
+            'in voice',
+          );
+          return;
+        }
+      }
+
+      // ---- Voice playback ----
       const onVoice = (pcm, rate, from) => {
         try {
           if (!playCtx) playCtx = new AudioContext();
-          const buf = playCtx.createBuffer(1, pcm.length, rate); // 8 kHz; browser upsamples
+          const buf = playCtx.createBuffer(1, pcm.length, rate);
           buf.getChannelData(0).set(pcm);
           const src = playCtx.createBufferSource();
           src.buffer = buf;
           src.connect(playCtx.destination);
           src.start();
           log(`  ▶ playing ${(pcm.length / rate).toFixed(1)}s from ${from}`);
-        } catch (e) {
-          log('playback error: ' + e);
-        }
+        } catch (e) { log('playback error: ' + e); }
       };
 
-      // ---- mic capture (raw PCM via Web Audio) ----
+      // ---- Mic capture ----
       let recording = null;
       async function startRecording() {
         const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-          },
+          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
         });
         const ctx = new AudioContext();
         const source = ctx.createMediaStreamSource(stream);
         const proc = ctx.createScriptProcessor(4096, 1, 1);
-        const silent = ctx.createGain();
-        silent.gain.value = 0;
+        const silent = ctx.createGain(); silent.gain.value = 0;
         const chunks = [];
         proc.onaudioprocess = (e) => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
-        source.connect(proc);
-        proc.connect(silent);
-        silent.connect(ctx.destination);
+        source.connect(proc); proc.connect(silent); silent.connect(ctx.destination);
         recording = { stream, ctx, source, proc, silent, chunks, t0: performance.now() };
         recBtn.textContent = '⏹ Stop';
         recBtn.classList.add('rec');
@@ -365,32 +591,39 @@
         };
         tick();
       }
-
       async function stopRecording() {
-        const r = recording;
-        recording = null;
-        recBtn.textContent = '🎙 Record';
-        recBtn.classList.remove('rec');
-        recTimer.textContent = '';
-        r.proc.disconnect();
-        r.source.disconnect();
-        r.silent.disconnect();
+        const r = recording; recording = null;
+        recBtn.textContent = '🎙 Record'; recBtn.classList.remove('rec'); recTimer.textContent = '';
+        r.proc.disconnect(); r.source.disconnect(); r.silent.disconnect();
         r.stream.getTracks().forEach((t) => t.stop());
         const rate = r.ctx.sampleRate;
         await r.ctx.close();
         const total = r.chunks.reduce((n, a) => n + a.length, 0);
         if (total === 0) { log('recording empty'); return; }
         const pcm = new Float32Array(total);
-        let o = 0;
-        for (const a of r.chunks) { pcm.set(a, o); o += a.length; }
+        let o = 0; for (const a of r.chunks) { pcm.set(a, o); o += a.length; }
+        // Resolve the destination from the current thread selection.
+        const dest = parseThread(threadEl.value);
         log(`  ⟶ encoding + sending ${(total / rate).toFixed(1)}s of audio…`);
-        try {
-          await client.sendVoice(pcm, rate, 0, undefined);
-        } catch (e) {
-          log('❌ voice send failed: ' + e);
-        }
+        pushMessage(
+          threadEl.value,
+          threads.get(threadEl.value).label,
+          'You',
+          `(voice, ${(total / rate).toFixed(1)}s)`,
+          'out voice',
+        );
+        try { await client.sendVoice(pcm, rate, dest.channel, dest.to); }
+        catch (e) { log('❌ voice send failed: ' + e); }
       }
 
+      // "channel:N" → {channel: N, to: undefined}; "node:!HEX" → {channel: 0, to: hex u32}
+      function parseThread(key) {
+        if (key.startsWith('channel:')) return { channel: parseInt(key.slice(8), 10), to: undefined };
+        if (key.startsWith('node:')) return { channel: 0, to: parseInt(key.slice(6), 16) };
+        return { channel: 0, to: undefined };
+      }
+
+      // ---- Connect/send ----
       if (!('serial' in navigator)) {
         logEl.textContent = 'Web Serial unavailable. Use Chrome/Edge or Firefox 151+ over localhost/HTTPS.';
         connectBtn.disabled = true;
@@ -402,32 +635,42 @@
         connectBtn.onclick = async () => {
           connectBtn.disabled = true;
           setStatus('Connecting…', 'connecting');
+          connectHint.textContent = 'Pick a serial port in the browser prompt…';
           log('Requesting port…');
           try {
-            client = await connect((e) => log('  ⟵ ' + e), onVoice);
+            client = await connect(handleEvent, onVoice);
             log('Connected. Config handshake in flight…');
             setStatus('Connected', 'connecting');
+            connectHint.textContent = 'Connected — waiting for ConfigComplete…';
             textEl.disabled = false;
             sendBtn.disabled = false;
             recBtn.disabled = false;
             denoiseEl.disabled = false;
+            renderChat(); // refresh placeholder text
           } catch (e) {
             log('❌ ' + e);
             setStatus('Disconnected');
             connectBtn.disabled = false;
+            connectHint.textContent = 'Click Connect, then pick the serial port.';
           }
         };
 
         const doSend = async () => {
           const text = textEl.value.trim();
           if (!text || !client) return;
+          const dest = parseThread(threadEl.value);
           try {
-            await client.sendText(text, 0, undefined);
+            await client.sendText(text, dest.channel, dest.to);
             log('  ⟶ sent: ' + text);
+            pushMessage(
+              threadEl.value,
+              threads.get(threadEl.value).label,
+              'You',
+              text,
+              'out',
+            );
             textEl.value = '';
-          } catch (e) {
-            log('❌ send failed: ' + e);
-          }
+          } catch (e) { log('❌ send failed: ' + e); }
         };
         sendBtn.onclick = doSend;
         textEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSend(); });
@@ -439,10 +682,8 @@
         };
 
         recBtn.onclick = async () => {
-          try {
-            if (recording) await stopRecording();
-            else await startRecording();
-          } catch (e) {
+          try { if (recording) await stopRecording(); else await startRecording(); }
+          catch (e) {
             log('❌ mic error: ' + e);
             recording = null;
             recBtn.textContent = '🎙 Record';
