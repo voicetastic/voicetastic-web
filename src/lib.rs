@@ -24,9 +24,8 @@ use voicetastic_core::protocol::{self, InboundCtx, InboundEvent, ProtocolState};
 use voicetastic_core::service::modem_preset_from_proto;
 use voicetastic_core::settings::api::VoiceFecMode;
 use voicetastic_core::voice::{
-    AssemblerConfig, AssemblyEvent, BuildConfig, MAX_BODY_SIZE, ModemPreset, VoiceAssembler,
-    VoiceCodec, build_message,
-    random_message_id, tx_policy,
+    AssemblerConfig, AssemblyEvent, BuildConfig, MAX_BODY_SIZE, ModemPreset, OutgoingVoiceRegistry,
+    VoiceAssembler, VoiceCodec, build_message, random_message_id, tx_policy,
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
@@ -73,6 +72,10 @@ struct Inner {
     next_id: Cell<u32>,
     /// RX-side voice reassembly — core's sans-IO `VoiceAssembler`.
     assembler: VoiceAssembler,
+    /// TX-side retransmit registry — core's sync `OutgoingVoiceRegistry`.
+    /// Tracks every message we've sent so we can service incoming NACKs by
+    /// reshipping the exact missing chunks (with cooldown + dedup, all in core).
+    registry: OutgoingVoiceRegistry,
     /// Latest firmware queue depth (from `QueueStatus`); gates voice TX so we
     /// don't overflow the radio. `u32::MAX` until the first report.
     queue_free: Cell<u32>,
@@ -161,15 +164,53 @@ impl Inner {
             last_in_stream: true,
         };
         let msg = build_message(&payload, &cfg).map_err(|e| err(&format!("build_message: {e}")))?;
+        let total = msg.frames.len();
+        let total_data = msg.total_data;
+        let message_id = cfg.message_id;
+        // Register before sending so an early NACK lands in the registry
+        // (its `pending_chunks` is seeded to {0..total_data} so overlapping
+        // NACKs are dedup'd until each chunk's `mark_chunk_sent` fires).
+        self.registry.register(message_id, &msg, channel, to);
+        log(&format!(
+            "voice: sending {total} frames ({total_data} data + {} parity, {} codec bytes)",
+            msg.parity_count,
+            payload.len()
+        ));
+        let frames: Vec<(u8, Vec<u8>)> = msg
+            .frames
+            .into_iter()
+            .enumerate()
+            .map(|(i, f)| (i as u8, f))
+            .collect();
+        self.send_voice_frames(message_id, total_data, frames, channel, to)
+            .await?;
+        log(&format!("voice: sent {total} frames"));
+        Ok(())
+    }
+
+    /// Paced, queue-backpressured send of a list of pre-built voice frames.
+    /// Used both by the initial burst and by NACK-driven retransmits, so the
+    /// pacing/backpressure policy applies identically. After each DATA chunk
+    /// (`chunk_index < total_data`) is written, `registry.mark_chunk_sent`
+    /// is called so a later NACK can request that chunk again if it's still
+    /// missing. Parity frames aren't tracked (the receiver NACKs by data
+    /// index only). The `Vec<u8>` payloads are owned bodies handed to the
+    /// transport's `data_packet` builder.
+    async fn send_voice_frames(
+        &self,
+        message_id: u32,
+        total_data: u8,
+        frames: Vec<(u8, Vec<u8>)>,
+        channel: u32,
+        to: Option<u32>,
+    ) -> Result<(), JsValue> {
         let pacing = self.pacing();
         let want_ack = to.is_some();
-        let total = msg.frames.len();
-        log(&format!("voice: sending {total} frames ({} codec bytes)", payload.len()));
-
         let mut last: Option<f64> = None;
-        for frame in msg.frames {
+        for (chunk_index, frame) in frames {
             // Pace: wait the remaining gap since the previous frame.
-            let elapsed = last.map(|t| std::time::Duration::from_secs_f64((now_ms() - t).max(0.0) / 1000.0));
+            let elapsed = last
+                .map(|t| std::time::Duration::from_secs_f64((now_ms() - t).max(0.0) / 1000.0));
             let wait = tx_policy::pacing_delay(elapsed, pacing);
             if !wait.is_zero() {
                 sleep_ms(wait.as_millis() as i32).await;
@@ -177,17 +218,29 @@ impl Inner {
             // Backpressure: don't push into a full firmware queue.
             let bp_start = now_ms();
             while !tx_policy::queue_has_room(self.queue_free.get()) {
-                if now_ms() - bp_start > tx_policy::RADIO_QUEUE_WAIT_TIMEOUT.as_millis() as f64 {
+                if now_ms() - bp_start
+                    > tx_policy::RADIO_QUEUE_WAIT_TIMEOUT.as_millis() as f64
+                {
                     break; // safety valve — proceed anyway
                 }
                 sleep_ms(60).await;
             }
             let id = self.alloc_id();
-            let pv = protocol::data_packet(id, PRIVATE_APP as i32, frame, channel, to, want_ack, false);
+            let pv = protocol::data_packet(
+                id,
+                PRIVATE_APP as i32,
+                frame,
+                channel,
+                to,
+                want_ack,
+                false,
+            );
             self.write_payload(pv).await?;
+            if chunk_index < total_data {
+                self.registry.mark_chunk_sent(message_id, chunk_index);
+            }
             last = Some(now_ms());
         }
-        log(&format!("voice: sent {total} frames"));
         Ok(())
     }
 }
@@ -285,6 +338,7 @@ pub async fn connect(
         state: RefCell::new(ProtocolState::default()),
         next_id: Cell::new(rand_u32()),
         assembler: VoiceAssembler::new(AssemblerConfig::default()),
+        registry: OutgoingVoiceRegistry::default(),
         queue_free: Cell::new(u32::MAX),
     });
 
@@ -404,6 +458,50 @@ fn handle_voice(
             ..
         } => emit(on_event, &format!("🎙️ voice {received_data}/{total_data} from {from}")),
         AssemblyEvent::Rejected(e) => log(&format!("voice rejected: {e}")),
+        AssemblyEvent::Nack(nack) => {
+            // The peer asked us to retransmit `nack.missing` chunks of one of
+            // our outgoing messages. core's `OutgoingVoiceRegistry` does the
+            // budget/cooldown/dedup; we just send the frames it hands back.
+            let pacing = inner.pacing();
+            let Some((channel, dest, total_data)) = inner.registry.meta(nack.message_id) else {
+                log(&format!(
+                    "nack for msg 0x{:x}: no registry entry (GC'd or never sent here)",
+                    nack.message_id
+                ));
+                return;
+            };
+            match inner.registry.take_retransmit(nack.message_id, &nack.missing, pacing) {
+                Ok(rt_frames) => {
+                    let n = rt_frames.len();
+                    let frames: Vec<(u8, Vec<u8>)> = rt_frames
+                        .into_iter()
+                        .map(|(idx, b)| (idx, b.to_vec()))
+                        .collect();
+                    emit(
+                        on_event,
+                        &format!(
+                            "  ⟶ retransmitting {n} chunk(s) for msg 0x{:x} (NACK from {from})",
+                            nack.message_id
+                        ),
+                    );
+                    // Send paced on the background event loop so the read loop
+                    // doesn't block on the burst.
+                    let retx_inner = inner.clone();
+                    wasm_bindgen_futures::spawn_local(async move {
+                        if let Err(e) = retx_inner
+                            .send_voice_frames(nack.message_id, total_data, frames, channel, dest)
+                            .await
+                        {
+                            log(&format!("retransmit send failed: {e:?}"));
+                        }
+                    });
+                }
+                Err(reason) => log(&format!(
+                    "retransmit skipped for msg 0x{:x}: {reason:?}",
+                    nack.message_id
+                )),
+            }
+        }
         _ => {}
     }
 }
