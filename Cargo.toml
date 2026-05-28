@@ -16,7 +16,7 @@ crate-type = ["cdylib", "rlib"]
 # pacing (voice::tx_policy), and the Codec2 codec (codec::codec2_encode/decode,
 # via the wasm-safe `codec2` feature — no Opus/C deps). No native transports/
 # tokio (default-features off). Path dep for now; switch to a git dep later.
-voicetastic-core = { path = "../voicetastic-desktop/crates/voicetastic-core", default-features = false, features = ["codec2"] }
+voicetastic-core = { path = "../voicetastic-desktop/crates/voicetastic-core", default-features = false, features = ["codec2", "denoise"] }
 
 # Same prost as core (0.14) so the generated `proto` types share one trait impl.
 prost = "0.14"

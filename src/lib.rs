@@ -16,7 +16,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use prost::Message as _;
-use voicetastic_core::codec::{codec2_decode, codec2_encode};
+use voicetastic_core::codec::{Denoiser, codec2_decode, codec2_encode};
 use voicetastic_core::node::NodeId;
 use voicetastic_core::ports::PRIVATE_APP;
 use voicetastic_core::proto::ToRadio;
@@ -82,6 +82,10 @@ struct Inner {
     /// Latest firmware queue depth (from `QueueStatus`); gates voice TX so we
     /// don't overflow the radio. `u32::MAX` until the first report.
     queue_free: Cell<u32>,
+    /// Run captured audio through core's RNNoise denoiser before encoding.
+    /// On by default; runtime-toggleable via `WebClient::setDenoiseEnabled`.
+    /// Requires 48 kHz input — skipped if the AudioContext is at another rate.
+    denoise_enabled: Cell<bool>,
 }
 
 impl Inner {
@@ -139,8 +143,27 @@ impl Inner {
     /// worker: Codec2 encode (core `codec2_encode`) → core `build_message` → per-frame
     /// pacing (`tx_policy`) + queue backpressure → PRIVATE_APP data packets.
     async fn send_voice(&self, pcm: &[f32], in_rate: u32, channel: u32, to: Option<u32>) -> Result<(), JsValue> {
+        // RNNoise (core's `Denoiser`) runs on 48 kHz mono normalised f32. Skip
+        // when the input is at a different rate or the user disabled it; the
+        // raw PCM goes straight to the encoder in that case.
+        let cleaned: Vec<f32>;
+        let pcm_for_encode: &[f32] = if self.denoise_enabled.get() && in_rate == 48_000 {
+            let mut d = Denoiser::new();
+            let mut out = Vec::with_capacity(pcm.len());
+            d.process(pcm, &mut out);
+            d.flush(&mut out);
+            cleaned = out;
+            log(&format!(
+                "voice: denoised {} → {} samples @ 48 kHz",
+                pcm.len(),
+                cleaned.len()
+            ));
+            &cleaned
+        } else {
+            pcm
+        };
         let payload =
-            codec2_encode(pcm, in_rate, VOICE_CODEC_PARAM).map_err(|e| err(&e.to_string()))?;
+            codec2_encode(pcm_for_encode, in_rate, VOICE_CODEC_PARAM).map_err(|e| err(&e.to_string()))?;
         // chunk_size + FEC parity match the desktop's policy — both are derived
         // from the radio's LoRa modem preset + destination via core helpers, so
         // a clip sent from the browser is wire-equivalent to one sent from the
@@ -277,6 +300,13 @@ impl WebClient {
         })
     }
 
+    /// Toggle the RNNoise denoiser. On by default. Takes effect on the next
+    /// `sendVoice` (in-flight clips are unaffected).
+    #[wasm_bindgen(js_name = setDenoiseEnabled)]
+    pub fn set_denoise_enabled(&self, enabled: bool) {
+        self.inner.denoise_enabled.set(enabled);
+    }
+
     /// Send a voice clip: mono f32 PCM at `in_rate` Hz, encoded with Codec2 and
     /// sent as paced PRIVATE_APP frames. `to` undefined = broadcast.
     #[wasm_bindgen(js_name = sendVoice)]
@@ -343,6 +373,7 @@ pub async fn connect(
         assembler: VoiceAssembler::new(AssemblerConfig::default()),
         registry: OutgoingVoiceRegistry::default(),
         queue_free: Cell::new(u32::MAX),
+        denoise_enabled: Cell::new(true),
     });
 
     // Background inbound loop: read → deframe → core decode → core state/voice.
