@@ -33,11 +33,11 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, future_to_promise};
 
-/// Codec2 mode for outgoing voice. Mode 0 = 3200 bps, the highest-quality
-/// Codec2 mode. Codec2 at 1200 bps (mode 5) saves airtime but sounds heavily
-/// robotic; 3200 keeps the codec airtime modest while staying intelligible.
-/// See core's `codec::c2::mode_from_param`.
-const VOICE_CODEC_PARAM: u8 = 0;
+/// Default Codec2 mode for outgoing voice. Mode 0 = 3200 bps, the highest-
+/// quality Codec2 mode. Modes 0..=5 progress 3200→2400→1600→1400→1300→1200 bps;
+/// lower bps saves airtime but sounds more robotic. Runtime-settable via
+/// `WebClient.setCodec2Mode` — stored on `Inner.codec_param`.
+const DEFAULT_CODEC2_MODE: u8 = 0;
 /// Inter-frame pacing fallback before the radio's LoRa config is known.
 const DEFAULT_PACING_MS: u64 = 250;
 
@@ -88,6 +88,9 @@ struct Inner {
     /// On by default; runtime-toggleable via `WebClient::setDenoiseEnabled`.
     /// Requires 48 kHz input — skipped if the AudioContext is at another rate.
     denoise_enabled: Cell<bool>,
+    /// Codec2 mode (0..=5) for outgoing voice. Runtime-settable via
+    /// `WebClient::setCodec2Mode`.
+    codec_param: Cell<u8>,
 }
 
 impl Inner {
@@ -187,7 +190,7 @@ impl Inner {
             pcm
         };
         let payload =
-            codec2_encode(pcm_for_encode, in_rate, VOICE_CODEC_PARAM).map_err(|e| err(&e.to_string()))?;
+            codec2_encode(pcm_for_encode, in_rate, self.codec_param.get()).map_err(|e| err(&e.to_string()))?;
         // chunk_size + FEC parity match the desktop's policy — both are derived
         // from the radio's LoRa modem preset + destination via core helpers, so
         // a clip sent from the browser is wire-equivalent to one sent from the
@@ -208,7 +211,7 @@ impl Inner {
             message_id: random_message_id().map_err(|e| err(&e.to_string()))?,
             stream_seq: 0,
             codec: VoiceCodec::Codec2,
-            codec_param: VOICE_CODEC_PARAM,
+            codec_param: self.codec_param.get(),
             chunk_size,
             parity_count,
             last_in_stream: true,
@@ -329,6 +332,13 @@ impl WebClient {
     #[wasm_bindgen(js_name = setDenoiseEnabled)]
     pub fn set_denoise_enabled(&self, enabled: bool) {
         self.inner.denoise_enabled.set(enabled);
+    }
+
+    /// Set the Codec2 mode (0..=5; 0 = 3200 bps, 5 = 1200 bps). Takes effect
+    /// on the next `sendVoice`. Out-of-range values are clamped.
+    #[wasm_bindgen(js_name = setCodec2Mode)]
+    pub fn set_codec2_mode(&self, mode: u8) {
+        self.inner.codec_param.set(mode.min(5));
     }
 
     /// Active node-discovery ping: broadcast our `User` on `NODEINFO_APP` with
@@ -560,6 +570,7 @@ pub async fn connect(
         registry: OutgoingVoiceRegistry::default(),
         queue_free: Cell::new(u32::MAX),
         denoise_enabled: Cell::new(true),
+        codec_param: Cell::new(DEFAULT_CODEC2_MODE),
     });
 
     // Background inbound loop: read → deframe → core decode → core state/voice.
@@ -654,7 +665,15 @@ fn handle_voice(
     let from = vd.from.to_string();
     match inner.assembler.accept(&from, vd.to, vd.channel, &vd.payload) {
         AssemblyEvent::Complete(msg) => {
-            emit(on_event, &format!("🎙️ voice complete from {from} ({} chunks)", msg.total_data));
+            emit(
+                on_event,
+                &format!(
+                    "🎙️ voice complete from {from} to {} ch{} ({} chunks)",
+                    voice_dest_str(&msg.to),
+                    msg.channel,
+                    msg.total_data
+                ),
+            );
             if msg.codec != VoiceCodec::Codec2 {
                 log(&format!("voice: codec {:?} not playable in v1 (Codec2 only)", msg.codec));
                 return;
@@ -728,6 +747,18 @@ fn handle_voice(
 
 fn emit(cb: &js_sys::Function, line: &str) {
     let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(line));
+}
+
+/// Render a `VoiceDestination` as the same `0x...`-hex format we use for
+/// node IDs in event lines, with `0xffffffff` standing in for broadcast — so
+/// the JS chat router can apply the exact same broadcast-vs-DM rule it uses
+/// for IncomingText.
+fn voice_dest_str(dest: &voicetastic_core::voice::VoiceDestination) -> String {
+    use voicetastic_core::voice::VoiceDestination::*;
+    match dest {
+        Broadcast => "0xffffffff".to_string(),
+        Node(id) => format!("0x{:x}", id.as_u32()),
+    }
 }
 
 /// Drive `VoiceAssembler::tick()` periodically and emit any returned NACK
@@ -817,7 +848,10 @@ fn event_summary(ev: &InboundEvent, state: &ProtocolState) -> String {
                 .map(|m| m.firmware_version.as_str())
                 .unwrap_or("?")
         ),
-        InboundEvent::IncomingText(t) => format!("💬 text from 0x{:x}: {}", t.from, t.text),
+        InboundEvent::IncomingText(t) => format!(
+            "💬 text from 0x{:x} to 0x{:x} ch{}: {}",
+            t.from, t.to, t.channel, t.text
+        ),
         InboundEvent::IncomingData(d) => {
             format!("data port={} from=0x{:x} ({} bytes)", d.portnum, d.from, d.payload.len())
         }

@@ -217,19 +217,45 @@
       }
 
       /* ----- Settings ----- */
+      h2.category {
+        margin: 1.75rem 0 0.5rem;
+        font-size: 0.85rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--text-muted);
+        font-weight: 600;
+      }
+      h2.category:first-of-type { margin-top: 1rem; }
       .setcard {
         background: var(--bg-card);
         border: 1px solid var(--border);
         border-radius: var(--radius);
-        margin-top: 1rem;
+        margin-top: 0.6rem;
+        overflow: hidden; /* keep summary's border-radius clean when open */
       }
+      .setcard > summary,
       .setcard > header {
         display: flex; align-items: center; justify-content: space-between;
         gap: 0.5rem; padding: 0.9rem 1.1rem;
-        border-bottom: 1px solid var(--border);
+        cursor: pointer;
+        list-style: none;
+        user-select: none;
       }
-      .setcard > header h3 { margin: 0; font-size: 1rem; }
-      .setcard > header .hint { font-size: 0.8rem; color: var(--text-muted); margin-right: auto; margin-left: 0.6rem; }
+      /* Hide native disclosure triangle; we draw our own caret. */
+      .setcard > summary::-webkit-details-marker { display: none; }
+      .setcard > summary::before {
+        content: '▸';
+        color: var(--text-muted);
+        font-size: 0.8rem;
+        margin-right: 0.5rem;
+        transition: transform 0.15s ease;
+      }
+      .setcard[open] > summary::before { transform: rotate(90deg); display: inline-block; }
+      .setcard[open] > summary { border-bottom: 1px solid var(--border); }
+      .setcard > summary h3,
+      .setcard > header h3 { margin: 0; font-size: 1rem; flex: 1; }
+      .setcard > summary .hint,
+      .setcard > header .hint { font-size: 0.8rem; color: var(--text-muted); margin: 0 0.6rem; }
       .setcard > .fields {
         padding: 0.9rem 1.1rem;
         display: grid;
@@ -352,10 +378,7 @@
               <option value="channel:0">Broadcast — Channel 0</option>
             </select>
             <span style="flex:1"></span>
-            <label class="muted" style="display:flex; align-items:center; gap:0.35rem;">
-              <input id="denoise" type="checkbox" checked disabled />
-              Noise suppression
-            </label>
+            <a href="#/settings" class="muted" style="font-size:0.8rem;">Audio &amp; codec settings →</a>
           </div>
           <div id="chat-messages" class="chat-messages">
             <div class="placeholder">Connect a radio to start chatting.</div>
@@ -386,7 +409,35 @@
           <button id="settings-refresh" disabled>Refresh from device</button>
           <span id="settings-hint" class="muted">Connect a radio to load settings.</span>
         </div>
+
+        <h2 class="category">Meshtastic</h2>
         <div id="settings-cards"></div>
+
+        <h2 class="category">Audio</h2>
+        <details class="setcard">
+          <summary>
+            <h3>🎙 Audio</h3>
+            <span class="hint">client-side voice settings</span>
+          </summary>
+          <div class="fields">
+            <label for="denoise">Noise suppression (RNNoise)</label>
+            <div>
+              <input id="denoise" type="checkbox" checked disabled />
+              <span class="muted" style="font-size:0.8rem;">
+                Capture-side denoise via core's <code>codec::Denoiser</code>.
+              </span>
+            </div>
+            <label for="codec-mode">Codec2 mode</label>
+            <select id="codec-mode" disabled>
+              <option value="0">3200 bps — best quality (default)</option>
+              <option value="1">2400 bps</option>
+              <option value="2">1600 bps</option>
+              <option value="3">1400 bps</option>
+              <option value="4">1300 bps</option>
+              <option value="5">1200 bps — lowest airtime</option>
+            </select>
+          </div>
+        </details>
       </section>
 
       <!-- ================================= MAP ================================= -->
@@ -414,6 +465,7 @@
       const recBtn = document.getElementById('record');
       const recTimer = document.getElementById('rectimer');
       const denoiseEl = document.getElementById('denoise');
+      const codecModeEl = document.getElementById('codec-mode');
       const discoverBtn = document.getElementById('discover');
       const threadEl = document.getElementById('chat-thread');
       const chatEl = document.getElementById('chat-messages');
@@ -578,30 +630,39 @@
           renderSettings();
           return;
         }
-        // 💬 text from 0xHEX: body
-        m = line.match(/^💬 text from 0x([0-9a-f]+): (.*)$/);
+        // 💬 text from 0xHEX_FROM to 0xHEX_TO chN: body
+        m = line.match(/^💬 text from 0x([0-9a-f]+) to 0x([0-9a-f]+) ch(\d+): (.*)$/);
         if (m) {
-          const fromHex = '!' + m[1];
-          const fromName = knownNodes.get(fromHex) || fromHex;
-          // For v1, all inbound texts land on Broadcast Ch 0 (the protocol
-          // does include a channel but the event summary doesn't carry it).
-          pushMessage('channel:0', 'Broadcast — Channel 0', fromName, m[2], 'in');
+          routeIncoming(m[1], m[2], parseInt(m[3], 10), m[4], 'in');
           return;
         }
-        // 🎙️ voice complete from !HEX (N chunks)
-        m = line.match(/^🎙️ voice complete from (\S+) \((\d+) chunks?\)/);
+        // 🎙️ voice complete from !HEX_FROM to 0xHEX_TO chN (X chunks)
+        m = line.match(/^🎙️ voice complete from !?([0-9a-f]+) to 0x([0-9a-f]+) ch(\d+) \((\d+) chunks?\)/);
         if (m) {
-          const fromHex = m[1];
-          const fromName = knownNodes.get(fromHex) || fromHex;
-          pushMessage(
-            'channel:0',
-            'Broadcast — Channel 0',
-            fromName,
-            `(voice, ${m[2]} chunks)`,
-            'in voice',
-          );
+          routeIncoming(m[1], m[2], parseInt(m[3], 10), `(voice, ${m[4]} chunks)`, 'in voice');
           return;
         }
+      }
+
+      // Decide which chat thread an inbound message belongs to, mirroring the
+      // desktop logic:
+      //   to == BROADCAST_ADDR (0xffffffff) → broadcast on `channel`
+      //   to == my node num                 → DM, threaded by sender
+      //   otherwise                         → not addressed to us; drop
+      function routeIncoming(fromHex, toHex, channel, body, kind) {
+        const fromKey = '!' + fromHex;
+        const fromName = knownNodes.get(fromKey) || fromKey;
+        if (toHex === 'ffffffff') {
+          const key = `channel:${channel}`;
+          const label = channel === 0 ? 'Broadcast — Channel 0' : `Channel ${channel}`;
+          pushMessage(key, label, fromName, body, kind);
+        } else if (myNodeHex && toHex === myNodeHex.slice(1)) {
+          // DM addressed to us; thread by sender.
+          const key = `node:${fromKey}`;
+          const label = `DM — ${fromName} (${fromKey})`;
+          pushMessage(key, label, fromName, body, kind);
+        }
+        // else: flood-routed traffic destined for another node — log only.
       }
 
       // ---- Voice playback ----
@@ -696,6 +757,7 @@
             sendBtn.disabled = false;
             recBtn.disabled = false;
             denoiseEl.disabled = false;
+            codecModeEl.disabled = false;
             discoverBtn.hidden = false; // visible once connected, enabled at Ready
             settingsRefreshBtn.disabled = false;
             renderChat(); // refresh placeholder text
@@ -731,6 +793,13 @@
           if (!client) return;
           client.setDenoiseEnabled(denoiseEl.checked);
           log(`noise suppression ${denoiseEl.checked ? 'on' : 'off'}`);
+        };
+
+        codecModeEl.onchange = () => {
+          if (!client) return;
+          const mode = parseInt(codecModeEl.value, 10);
+          client.setCodec2Mode(mode);
+          log(`codec2 mode set to ${codecModeEl.options[codecModeEl.selectedIndex].text}`);
         };
 
         recBtn.onclick = async () => {
@@ -871,10 +940,10 @@
         }
 
         function renderSection(section, sectionValue) {
-          const card = document.createElement('div');
+          const card = document.createElement('details');
           card.className = 'setcard';
           card.dataset.section = section.key;
-          const hdr = document.createElement('header');
+          const hdr = document.createElement('summary');
           hdr.innerHTML = `<h3>${section.title}</h3>`;
           if (!sectionValue) {
             const h = document.createElement('span');
@@ -884,7 +953,10 @@
           }
           const apply = document.createElement('button');
           apply.className = 'apply'; apply.textContent = 'Apply';
-          apply.onclick = async () => {
+          // Don't let Apply clicks toggle the <details>.
+          apply.addEventListener('click', (e) => e.stopPropagation());
+          apply.onclick = async (e) => {
+            e.stopPropagation();
             const dto = {};
             for (const f of section.fields) {
               const el = card.querySelector(`[name="${f.name}"]`);
@@ -922,9 +994,9 @@
 
         function renderChannelsCard(channels) {
           const wrap = document.createElement('div');
-          const card = document.createElement('div');
+          const card = document.createElement('details');
           card.className = 'setcard';
-          const hdr = document.createElement('header');
+          const hdr = document.createElement('summary');
           hdr.innerHTML = `<h3>💬 Channels</h3><span class="hint">${(channels || []).length} configured</span>`;
           card.appendChild(hdr);
           const fields = document.createElement('div');
@@ -963,7 +1035,8 @@
           dn.appendChild(dnChk); dn.appendChild(document.createTextNode(' downlink'));
           const apply = document.createElement('button');
           apply.className = 'apply'; apply.textContent = 'Apply';
-          apply.onclick = async () => {
+          apply.onclick = async (e) => {
+            e.stopPropagation();
             const dto = {
               index: ch.index, role: ch.role,
               name: name.value,
