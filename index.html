@@ -431,7 +431,7 @@
             <select id="send-codec" disabled>
               <option value="codec2">Codec2 — LoRa-optimal, pure Rust</option>
               <option value="amrnb">AMR-NB — interop w/ desktop/Android, opencore-amr via emscripten</option>
-              <option value="opus" disabled>Opus — encoder unavailable in browser</option>
+              <option value="opus">Opus — best quality, libopus via emscripten</option>
             </select>
             <label for="codec-mode" data-codec="codec2">Codec2 mode</label>
             <select id="codec-mode" data-codec="codec2" disabled>
@@ -453,9 +453,22 @@
               <option value="6">MR102 — 10.2 kbps</option>
               <option value="7">MR122 — 12.2 kbps</option>
             </select>
+            <label for="opus-kbps" data-codec="opus" hidden>Opus bitrate</label>
+            <select id="opus-kbps" data-codec="opus" disabled hidden>
+              <option value="6">6 kbps — narrowband telephony</option>
+              <option value="8">8 kbps</option>
+              <option value="10">10 kbps</option>
+              <option value="12" selected>12 kbps — VoIP default</option>
+              <option value="16">16 kbps</option>
+              <option value="20">20 kbps — wideband voice</option>
+              <option value="24">24 kbps</option>
+              <option value="32">32 kbps — high quality</option>
+              <option value="48">48 kbps</option>
+              <option value="64">64 kbps — near-transparent voice</option>
+            </select>
             <label>Playback support</label>
             <div class="muted" style="font-size:0.85rem;">
-              ✓ Codec2 &nbsp;·&nbsp; ✓ Opus (pure-Rust <code>opus-decoder</code>)
+              ✓ Codec2 &nbsp;·&nbsp; ✓ Opus (libopus → emscripten standalone wasm)
               &nbsp;·&nbsp; ✓ AMR-NB (opencore-amr → emscripten standalone wasm)
             </div>
           </div>
@@ -490,6 +503,7 @@
       const sendCodecEl = document.getElementById('send-codec');
       const codecModeEl = document.getElementById('codec-mode');
       const amrnbModeEl = document.getElementById('amrnb-mode');
+      const opusKbpsEl = document.getElementById('opus-kbps');
       const discoverBtn = document.getElementById('discover');
       const threadEl = document.getElementById('chat-thread');
       const chatEl = document.getElementById('chat-messages');
@@ -784,6 +798,7 @@
             sendCodecEl.disabled = false;
             codecModeEl.disabled = false;
             amrnbModeEl.disabled = false;
+            opusKbpsEl.disabled = false;
             refreshCodecRows();
             discoverBtn.hidden = false; // visible once connected, enabled at Ready
             settingsRefreshBtn.disabled = false;
@@ -834,6 +849,13 @@
           const mode = parseInt(amrnbModeEl.value, 10);
           client.setAmrnbMode(mode);
           log(`AMR-NB mode set to ${amrnbModeEl.options[amrnbModeEl.selectedIndex].text}`);
+        };
+
+        opusKbpsEl.onchange = () => {
+          if (!client) return;
+          const kbps = parseInt(opusKbpsEl.value, 10);
+          client.setOpusKbps(kbps);
+          log(`Opus bitrate set to ${opusKbpsEl.options[opusKbpsEl.selectedIndex].text}`);
         };
 
         sendCodecEl.onchange = () => {

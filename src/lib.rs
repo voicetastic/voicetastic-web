@@ -19,7 +19,8 @@ use std::rc::Rc;
 
 use prost::Message as _;
 use voicetastic_core::codec::{
-    Denoiser, amrnb_decode, amrnb_encode, amrnb_init, codec2_decode, codec2_encode, opus_decode,
+    Denoiser, amrnb_decode, amrnb_encode, amrnb_init, codec2_decode, codec2_encode, opus_encode,
+    opus_init, opus_wasm_decode,
 };
 use voicetastic_core::node::NodeId;
 use voicetastic_core::ports::PRIVATE_APP;
@@ -94,12 +95,16 @@ struct Inner {
     /// `WebClient::setCodec2Mode`.
     codec_param: Cell<u8>,
     /// Which codec to use for outgoing voice. Numeric so it crosses the
-    /// wasm-bindgen boundary directly: 0 = Codec2 (default), 1 = AMR-NB.
-    /// (Opus encode isn't available in the browser, see UI for details.)
+    /// wasm-bindgen boundary directly: 0 = Codec2 (default, LoRa-optimal),
+    /// 1 = AMR-NB (telephony interop), 2 = Opus (best quality, higher airtime).
     send_codec: Cell<u8>,
     /// AMR-NB mode (0..=7) for outgoing voice when send_codec == AMR-NB.
     /// Default 5 = MR795 (7.95 kbps), matching the desktop GUI's default.
     amrnb_mode: Cell<u8>,
+    /// Opus target bitrate in kbps for outgoing voice when send_codec == Opus.
+    /// Default 12 kbps matches the desktop GUI's `OPUS_BITRATE` constant —
+    /// good VoIP quality at modest airtime. Range 6..=128 per RFC 6716.
+    opus_kbps: Cell<u8>,
 }
 
 impl Inner {
@@ -199,8 +204,9 @@ impl Inner {
             pcm
         };
         // Dispatch by the chosen send codec. Codec2 stays the LoRa-optimal
-        // default; AMR-NB is offered for interop with desktop/Android senders
-        // that prefer it. Both paths feed the same `build_message` framing.
+        // default; AMR-NB and Opus are offered for interop with desktop/
+        // Android senders that prefer them. All three paths feed the same
+        // `build_message` framing.
         let (payload, codec, codec_param) = match self.send_codec.get() {
             1 => {
                 let mode = self.amrnb_mode.get();
@@ -208,6 +214,13 @@ impl Inner {
                     .await
                     .map_err(|e| err(&format!("amrnb encode: {e:?}")))?;
                 (bytes, VoiceCodec::AmrNb, mode)
+            }
+            2 => {
+                let kbps = self.opus_kbps.get();
+                let bytes = opus_encode(pcm_for_encode, in_rate, kbps)
+                    .await
+                    .map_err(|e| err(&format!("opus encode: {e:?}")))?;
+                (bytes, VoiceCodec::Opus, kbps)
             }
             _ => {
                 let mode = self.codec_param.get();
@@ -366,14 +379,16 @@ impl WebClient {
         self.inner.codec_param.set(mode.min(5));
     }
 
-    /// Pick the codec for outgoing voice: `"codec2"` (default, LoRa-optimal)
-    /// or `"amrnb"` (Adaptive Multi-Rate Narrowband, for interop). Any other
-    /// value is ignored. Decode of inbound voice always works for all
-    /// supported codecs regardless of this setting.
+    /// Pick the codec for outgoing voice: `"codec2"` (default, LoRa-optimal),
+    /// `"amrnb"` (Adaptive Multi-Rate Narrowband, telephony interop), or
+    /// `"opus"` (best quality, higher airtime). Any other value is ignored.
+    /// Decode of inbound voice always works for all supported codecs
+    /// regardless of this setting.
     #[wasm_bindgen(js_name = setSendCodec)]
     pub fn set_send_codec(&self, codec: &str) {
         let id: u8 = match codec {
             "amrnb" | "amr-nb" | "AMR-NB" => 1,
+            "opus" | "Opus" | "OPUS" => 2,
             _ => 0,
         };
         self.inner.send_codec.set(id);
@@ -385,6 +400,14 @@ impl WebClient {
     #[wasm_bindgen(js_name = setAmrnbMode)]
     pub fn set_amrnb_mode(&self, mode: u8) {
         self.inner.amrnb_mode.set(mode.min(7));
+    }
+
+    /// Opus target bitrate in kbps (6..=128 per RFC 6716) when sending in
+    /// Opus. Default 12 kbps matches desktop's `OPUS_BITRATE`. Takes effect
+    /// on the next `sendVoice`. Out-of-range values are clamped.
+    #[wasm_bindgen(js_name = setOpusKbps)]
+    pub fn set_opus_kbps(&self, kbps: u8) {
+        self.inner.opus_kbps.set(kbps.clamp(6, 128));
     }
 
     /// Active node-discovery ping: broadcast our `User` on `NODEINFO_APP` with
@@ -618,7 +641,8 @@ pub async fn connect(
         denoise_enabled: Cell::new(true),
         codec_param: Cell::new(DEFAULT_CODEC2_MODE),
         send_codec: Cell::new(0), // 0 = Codec2
-        amrnb_mode: Cell::new(5), // MR795
+        amrnb_mode: Cell::new(5), // MR795 — same default as desktop GUI
+        opus_kbps: Cell::new(12), // 12 kbps — same default as desktop GUI
     });
 
     // Background inbound loop: read → deframe → core decode → core state/voice.
@@ -636,12 +660,17 @@ pub async fn connect(
         nack_tick_loop(nack_inner).await;
     });
 
-    // Hand the vendored AMR-NB wasm to its JS shim so the first voice
+    // Hand the vendored codec wasms to their JS shims so the first voice
     // operation doesn't pay the WebAssembly.instantiate latency. Errors are
-    // logged but non-fatal — Codec2 paths still work without it.
+    // logged but non-fatal — Codec2 paths still work without either codec.
     wasm_bindgen_futures::spawn_local(async {
         if let Err(e) = amrnb_init().await {
             log(&format!("amrnb shim init failed: {e:?}"));
+        }
+    });
+    wasm_bindgen_futures::spawn_local(async {
+        if let Err(e) = opus_init().await {
+            log(&format!("opus shim init failed: {e:?}"));
         }
     });
 
@@ -731,13 +760,32 @@ fn handle_voice(
                     msg.total_data
                 ),
             );
-            // Dispatch by codec. Codec2/Opus have pure-Rust decoders in core;
-            // AMR-NB runs through the vendored emscripten wasm via a JS shim,
-            // which is async — so its branch spawns a local future and feeds
-            // the resulting PCM back to `on_voice` when it lands.
+            // Dispatch by codec. Codec2 has a pure-Rust decoder in core;
+            // AMR-NB and Opus go through their vendored emscripten wasms via
+            // JS shims, which are async — those branches spawn local futures
+            // and feed the resulting PCM back to `on_voice` when it lands.
             match msg.codec {
                 VoiceCodec::Codec2 => play_or_log(&codec2_decode(&msg.audio, msg.codec_param), on_voice, &from),
-                VoiceCodec::Opus => play_or_log(&opus_decode(&msg.audio, msg.codec_param), on_voice, &from),
+                VoiceCodec::Opus => {
+                    let payload = msg.audio.clone();
+                    let codec_param = msg.codec_param;
+                    let on_voice = on_voice.clone();
+                    let from = from.clone();
+                    wasm_bindgen_futures::spawn_local(async move {
+                        match opus_wasm_decode(&payload, codec_param).await {
+                            Ok((pcm, rate)) => {
+                                let arr = js_sys::Float32Array::from(pcm.as_slice());
+                                let _ = on_voice.call3(
+                                    &JsValue::NULL,
+                                    &arr,
+                                    &JsValue::from_f64(rate as f64),
+                                    &JsValue::from_str(&from),
+                                );
+                            }
+                            Err(e) => log(&format!("Opus decode failed: {e:?}")),
+                        }
+                    });
+                }
                 VoiceCodec::AmrNb => {
                     let payload = msg.audio.clone();
                     let on_voice = on_voice.clone();
