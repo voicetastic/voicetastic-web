@@ -110,7 +110,17 @@
       // ---- mic capture (raw PCM via Web Audio) ----
       let recording = null; // { stream, ctx, source, proc, silent, chunks, t0 }
       async function startRecording() {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        // Disable the browser's mic preprocessing: AGC pumps gain on quiet
+        // input, NS adds spectral artefacts, EC distorts. Codec2's LPC
+        // analysis is sensitive to all three, so we want the rawest signal
+        // the OS will give us.
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+          },
+        });
         const ctx = new AudioContext();
         const source = ctx.createMediaStreamSource(stream);
         // ScriptProcessor is the simplest raw-PCM tap for a demo; an

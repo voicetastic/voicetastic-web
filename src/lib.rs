@@ -31,8 +31,11 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, future_to_promise};
 
-/// Codec2 @ 1200 bps — lowest airtime, best for LoRa (codec_param 5; core's codec::c2).
-const VOICE_CODEC_PARAM: u8 = 5;
+/// Codec2 mode for outgoing voice. Mode 0 = 3200 bps, the highest-quality
+/// Codec2 mode. Codec2 at 1200 bps (mode 5) saves airtime but sounds heavily
+/// robotic; 3200 keeps the codec airtime modest while staying intelligible.
+/// See core's `codec::c2::mode_from_param`.
+const VOICE_CODEC_PARAM: u8 = 0;
 /// Inter-frame pacing fallback before the radio's LoRa config is known.
 const DEFAULT_PACING_MS: u64 = 250;
 
