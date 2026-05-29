@@ -1,0 +1,110 @@
+# Build the wasm bundle + bundle the static page into a GitHub Pages
+# artefact, deploy on every push to `master`.
+#
+# Equivalent of `just build-release` followed by a static-file deploy:
+#   1. emcc (Emscripten)   — opencore-amrnb + libopus wasm sub-deps
+#   2. protoc + libprotobuf — voicetastic-core's prost-build script
+#   3. Rust stable + wasm32-unknown-unknown
+#   4. wasm-pack build --target web --release  → fresh pkg/
+#   5. stage `index.html`, `style.css`, `favicon.svg`, `js/`, `pkg/` into
+#      `_site/` and upload it via actions/upload-pages-artifact
+#   6. actions/deploy-pages publishes the artefact
+#
+# One-time setup on GitHub:
+#   Settings → Pages → "Build and deployment" → Source: "GitHub Actions".
+#   (Run `gh api -X POST repos/voicetastic/voicetastic-web/pages -f
+#    'build_type=workflow' -f 'source[branch]=master' -f 'source[path]=/'`
+#    once; the deploy below then publishes on its own.)
+#
+# The site lives at https://voicetastic.github.io/voicetastic-web/ by
+# default — all asset paths in index.html are relative, so it works
+# under any URL prefix. To put it on a custom domain, set a CNAME in
+# Pages settings + point DNS at GitHub.
+
+name: Deploy
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protobuf-compiler + libprotobuf-dev
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            protobuf-compiler libprotobuf-dev
+
+      - name: Set up Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+          actions-cache-folder: emsdk-cache
+
+      - name: Set up Rust stable + wasm32 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          restore-keys: |
+            cargo-
+
+      - name: Install wasm-pack
+        run: |
+          if ! command -v wasm-pack >/dev/null; then
+            curl -fsSL https://rustwasm.github.io/wasm-pack/installer/init.sh \
+              | sh
+          fi
+          wasm-pack --version
+
+      - name: Build wasm bundle (release)
+        run: wasm-pack build --target web --out-dir pkg --release
+
+      - name: Stage Pages artefact
+        run: |
+          mkdir -p _site
+          cp index.html style.css favicon.svg _site/
+          cp -r js pkg _site/
+          # pkg/.gitignore would confuse downstream consumers — drop it.
+          rm -f _site/pkg/.gitignore
+          echo "--- _site contents ---"
+          ls -la _site/
+          du -sh _site/
+
+      - name: Upload Pages artefact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
