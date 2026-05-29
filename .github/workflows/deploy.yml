@@ -1,7 +1,10 @@
-# Build the wasm bundle + bundle the static page into a GitHub Pages
-# artefact, deploy on every push to `master`.
+# Build the wasm bundle, deploy the static page to GitHub Pages, and
+# cut a GitHub Release on every `vX.Y.Z` tag push. Mirrors the
+# voicetastic-android release flow: `auto-bump.yml` (next to this
+# file) watches master for Conventional Commits and pushes a tag;
+# the tag push fires this workflow and the page goes live.
 #
-# Equivalent of `just build-release` followed by a static-file deploy:
+# Pipeline mirrors `just build-release`:
 #   1. emcc (Emscripten)   — opencore-amrnb + libopus wasm sub-deps
 #   2. protoc + libprotobuf — voicetastic-core's prost-build script
 #   3. Rust stable + wasm32-unknown-unknown
@@ -9,27 +12,30 @@
 #   5. stage `index.html`, `style.css`, `favicon.svg`, `js/`, `pkg/` into
 #      `_site/` and upload it via actions/upload-pages-artifact
 #   6. actions/deploy-pages publishes the artefact
+#   7. softprops/action-gh-release creates the GitHub Release with the
+#      _site bundle attached as voicetastic-web-vX.Y.Z.tar.gz
 #
-# One-time setup on GitHub:
-#   Settings → Pages → "Build and deployment" → Source: "GitHub Actions".
-#   (Run `gh api -X POST repos/voicetastic/voicetastic-web/pages -f
-#    'build_type=workflow' -f 'source[branch]=master' -f 'source[path]=/'`
-#    once; the deploy below then publishes on its own.)
+# Manual trigger: workflow_dispatch lets you deploy current master at
+# will (e.g. to publish a doc-only fix without a version bump). The
+# release-creation step is skipped on that path — only tag pushes
+# produce a Release entry.
 #
-# The site lives at https://voicetastic.github.io/voicetastic-web/ by
-# default — all asset paths in index.html are relative, so it works
-# under any URL prefix. To put it on a custom domain, set a CNAME in
-# Pages settings + point DNS at GitHub.
+# One-time Pages setup on GitHub (idempotent):
+#   gh api -X POST repos/voicetastic/voicetastic-web/pages \
+#     -f 'build_type=workflow' \
+#     -f 'source[branch]=master' \
+#     -f 'source[path]=/'
 
-name: Deploy
+name: Release
 
 on:
   push:
-    branches: [master]
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write   # create GitHub Releases
   pages: write
   id-token: write
 
@@ -98,6 +104,25 @@ jobs:
         with:
           path: _site
 
+      # Also stage a downloadable tarball of the same bundle so the
+      # GitHub Release has a hosted-anywhere asset (mirrors, vendoring,
+      # archival). Only used by the `release` job below when the run
+      # was triggered by a tag push.
+      - name: Pack release tarball
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          tar -C _site -czf "$RUNNER_TEMP/voicetastic-web-${TAG}.tar.gz" .
+          ls -lh "$RUNNER_TEMP/voicetastic-web-${TAG}.tar.gz"
+
+      - name: Upload release tarball as workflow artefact
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-tarball
+          path: ${{ runner.temp }}/voicetastic-web-${{ github.ref_name }}.tar.gz
+          retention-days: 1
+
   deploy:
     needs: build
     runs-on: ubuntu-latest
@@ -108,3 +133,75 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+  release:
+    # Only on tag pushes — workflow_dispatch deploys without cutting
+    # a Release entry, since there's no version to anchor to.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, deploy]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # release-notes need git log <prev-tag>..HEAD
+
+      - name: Download release tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: release-tarball
+          path: ${{ runner.temp }}
+
+      - name: Generate release notes from conventional commits
+        id: notes
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          PAGES_URL: ${{ needs.deploy.outputs.page_url || 'https://voicetastic.github.io/voicetastic-web/' }}
+        run: |
+          set -eu
+          PREV=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname \
+                 | grep -v "^${TAG}$" | head -n1 || true)
+          RANGE="${PREV:+${PREV}..}${TAG}"
+
+          section() {
+            title=$1; pat=$2
+            lines=$(git log "$RANGE" --no-merges --pretty=format:'%h %s' \
+                    | grep -E "$pat" || true)
+            [ -z "$lines" ] && return 0
+            printf '\n### %s\n\n' "$title"
+            echo "$lines" | sed 's/^/- /'
+          }
+
+          NOTES="$RUNNER_TEMP/release-notes.md"
+          {
+            echo "Live at: $PAGES_URL"
+            echo ""
+            if [ -n "$PREV" ]; then
+              echo "Changes since [\`$PREV\`]($REPO_URL/releases/tag/$PREV)."
+            else
+              echo "First release."
+            fi
+            section "Breaking changes" '^[a-z]+(\([^)]+\))?!:'
+            section "Features"         '^feat(\([^)]+\))?:'
+            section "Fixes"            '^fix(\([^)]+\))?:'
+            section "Performance"      '^perf(\([^)]+\))?:'
+            section "Refactoring"      '^refactor(\([^)]+\))?:'
+            if [ -n "$PREV" ]; then
+              printf '\n**Full diff:** %s/compare/%s...%s\n' \
+                "$REPO_URL" "$PREV" "$TAG"
+            fi
+          } > "$NOTES"
+
+          echo "path=$NOTES" >> "$GITHUB_OUTPUT"
+          echo "--- release-notes.md ---"
+          cat "$NOTES"
+          echo "--- end notes ---"
+
+      - name: Create GitHub Release + attach tarball
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: voicetastic-web ${{ github.ref_name }}
+          body_path: ${{ steps.notes.outputs.path }}
+          files: ${{ runner.temp }}/voicetastic-web-${{ github.ref_name }}.tar.gz
+          fail_on_unmatched_files: true
