@@ -362,6 +362,7 @@
         </p>
         <div class="row">
           <button id="connect">Connect</button>
+          <button id="disconnect" class="ghost" hidden>Disconnect</button>
           <button id="discover" class="ghost" hidden disabled>🔍 Scan for nodes</button>
           <span id="connect-hint" class="muted">Click Connect, then pick the serial port.</span>
         </div>
@@ -501,6 +502,7 @@
       const statusEl = document.getElementById('status');
       const logEl = document.getElementById('log');
       const connectBtn = document.getElementById('connect');
+      const disconnectBtn = document.getElementById('disconnect');
       const connectHint = document.getElementById('connect-hint');
       const infoCard = document.getElementById('info');
       const infoBody = document.getElementById('info-body');
@@ -636,92 +638,137 @@
         if (threadEl.value === threadKey) renderChat();
       }
 
+      // Build a <code>text</code> element without going through innerHTML.
+      // Keeps radio-supplied strings (firmware version, node hex) out of
+      // HTML parsing — they only ever land as textContent.
+      function codeEl(text) {
+        const c = document.createElement('code');
+        c.textContent = text;
+        return c;
+      }
       function updateInfoCard() {
         if (myNodeNum == null) {
           infoBody.textContent = 'Waiting for config…';
         } else {
-          infoBody.innerHTML =
-            `Node <code>${myNodeHex}</code> (${myNodeNum})<br>` +
-            (fwVersion ? `Firmware <code>${fwVersion}</code><br>` : '') +
-            `${knownChannels.size} channel(s), ${knownNodes.size} node(s) known`;
+          infoBody.replaceChildren();
+          const line1 = document.createElement('div');
+          line1.append('Node ', codeEl(myNodeHex), ` (${myNodeNum})`);
+          infoBody.append(line1);
+          if (fwVersion) {
+            const line2 = document.createElement('div');
+            line2.append('Firmware ', codeEl(fwVersion));
+            infoBody.append(line2);
+          }
+          const line3 = document.createElement('div');
+          line3.textContent = `${knownChannels.size} channel(s), ${knownNodes.size} node(s) known`;
+          infoBody.append(line3);
         }
         infoCard.hidden = false;
       }
 
-      // Parse one core event-summary line (e.g. "🎙️ voice complete from !abcd")
-      // and route it to the right place. The richer events get structured tags
-      // for the chat view; everything still flows to the Connect-page log.
-      function handleEvent(line) {
-        log('  ⟵ ' + line);
+      // Dispatch one structured event from the wasm driver. `ev` is shaped
+      //   { type: 'my_info' | 'node_info' | 'incoming_text' | …, text, …fields }
+      // (see src/events.rs::build_event). The `text` field is always set so
+      // every event still flows to the Connect-page log unchanged.
+      const BROADCAST = 0xffffffff;
+      function handleEvent(ev) {
+        log('  ⟵ ' + ev.text);
+        switch (ev.type) {
+          case 'my_info': {
+            myNodeNum = ev.node_num;
+            myNodeHex = '!' + ev.node_num.toString(16);
+            updateInfoCard();
+            break;
+          }
+          case 'metadata': {
+            fwVersion = ev.firmware_version;
+            updateInfoCard();
+            break;
+          }
+          case 'channel': {
+            const idx = ev.index;
+            knownChannels.set(idx, `Channel ${idx}`);
+            ensureThread(`channel:${idx}`, idx === 0 ? 'Broadcast — Channel 0' : `Channel ${idx}`);
+            updateInfoCard();
+            break;
+          }
+          case 'node_info': {
+            const hex = '!' + ev.node_num.toString(16);
+            const name = ev.long_name || hex;
+            knownNodes.set(hex, name);
+            // Only create a DM thread for nodes that aren't us.
+            if (hex !== myNodeHex) ensureThread(`node:${hex}`, `DM — ${name} (${hex})`);
+            updateInfoCard();
+            break;
+          }
+          case 'config_complete': {
+            setStatus('Ready', 'ready');
+            connectHint.textContent = 'Connected and configured. Go to Chat to start talking.';
+            discoverBtn.disabled = false;
+            // First snapshot is ready — render Settings now so the cards are
+            // populated whenever the user navigates there.
+            renderSettings();
+            break;
+          }
+          case 'incoming_text': {
+            routeIncoming(ev.from, ev.to, ev.channel, ev.body, 'in');
+            break;
+          }
+          // Apply-confirmation watchers: the radio re-emits the matching
+          // event after applying an admin write, so we can flip the Apply
+          // button from "Awaiting confirm…" to "✓ Confirmed".
+          case 'config':
+            fireApplyConfirm(`config:${ev.section}`);
+            break;
+          case 'owner':
+            fireApplyConfirm('owner');
+            break;
+          // 'log', 'queue_status', 'incoming_data', 'channel' (when not
+          // pending) — log only.
+          default:
+            break;
+        }
+        // 'channel' rebroadcasts are also routed here so writeChannel can
+        // be confirmed. Done outside the switch because 'channel' is also
+        // used during the initial burst for chat-thread bootstrap above.
+        if (ev.type === 'channel') fireApplyConfirm(`channel:${ev.index}`);
+      }
 
-        // MyNodeInfo
-        let m = line.match(/^MyNodeInfo node_num=0x([0-9a-f]+)/);
-        if (m) {
-          myNodeNum = parseInt(m[1], 16);
-          myNodeHex = '!' + m[1];
-          updateInfoCard();
-          return;
-        }
-        // Metadata
-        m = line.match(/^Metadata fw=(\S+)/);
-        if (m) { fwVersion = m[1]; updateInfoCard(); return; }
-        // Channel[N] (total: M)
-        m = line.match(/^Channel\[(\d+)\]/);
-        if (m) {
-          const idx = parseInt(m[1], 10);
-          knownChannels.set(idx, `Channel ${idx}`);
-          ensureThread(`channel:${idx}`, idx === 0 ? 'Broadcast — Channel 0' : `Channel ${idx}`);
-          updateInfoCard();
-          return;
-        }
-        // NodeInfo 0xHEX "name" (known nodes: N)
-        m = line.match(/^NodeInfo 0x([0-9a-f]+) "([^"]*)"/);
-        if (m) {
-          const hex = '!' + m[1];
-          const name = m[2] || hex;
-          knownNodes.set(hex, name);
-          // Only create a DM thread for nodes that aren't us.
-          if (hex !== myNodeHex) ensureThread(`node:${hex}`, `DM — ${name} (${hex})`);
-          updateInfoCard();
-          return;
-        }
-        // ConfigComplete
-        if (line.includes('ConfigComplete')) {
-          setStatus('Ready', 'ready');
-          connectHint.textContent = 'Connected and configured. Go to Chat to start talking.';
-          discoverBtn.disabled = false;
-          // First snapshot is ready — render Settings now so the cards are
-          // populated whenever the user navigates there.
-          renderSettings();
-          return;
-        }
-        // 💬 text from 0xHEX_FROM to 0xHEX_TO chN: body
-        m = line.match(/^💬 text from 0x([0-9a-f]+) to 0x([0-9a-f]+) ch(\d+): (.*)$/);
-        if (m) {
-          routeIncoming(m[1], m[2], parseInt(m[3], 10), m[4], 'in');
-          return;
-        }
-        // 🎙️ voice complete from !HEX_FROM to 0xHEX_TO chN (X chunks)
-        //
-        // Don't push a chat row here — the real voice entry (with play
-        // controls + PCM attached) arrives via onVoice once decode finishes.
-        // We just let the line land in the event log as informational.
-        if (line.startsWith('🎙️ voice complete from ')) return;
+      // Apply-confirmation registry. Each pending Apply click registers a
+      // key; when the matching event arrives `fireApplyConfirm` resolves
+      // the corresponding promise. Timeouts resolve with `false`.
+      const pendingApplies = new Map();
+      function waitForApplyConfirm(key, timeoutMs = 3000) {
+        return new Promise((resolve) => {
+          // A second apply for the same key supersedes the first.
+          pendingApplies.get(key)?.cancel();
+          const timer = setTimeout(() => {
+            pendingApplies.delete(key);
+            resolve(false);
+          }, timeoutMs);
+          pendingApplies.set(key, {
+            confirm() { clearTimeout(timer); pendingApplies.delete(key); resolve(true); },
+            cancel() { clearTimeout(timer); pendingApplies.delete(key); resolve(false); },
+          });
+        });
+      }
+      function fireApplyConfirm(key) {
+        pendingApplies.get(key)?.confirm();
       }
 
       // Decide which chat thread an inbound message belongs to, mirroring the
       // desktop logic:
-      //   to == BROADCAST_ADDR (0xffffffff) → broadcast on `channel`
-      //   to == my node num                 → DM, threaded by sender
-      //   otherwise                         → not addressed to us; drop
-      function routeIncoming(fromHex, toHex, channel, body, kind) {
-        const fromKey = '!' + fromHex;
+      //   to == BROADCAST (0xffffffff) → broadcast on `channel`
+      //   to == my node num            → DM, threaded by sender
+      //   otherwise                    → not addressed to us; drop
+      function routeIncoming(fromNum, toNum, channel, body, kind) {
+        const fromKey = '!' + fromNum.toString(16);
         const fromName = knownNodes.get(fromKey) || fromKey;
-        if (toHex === 'ffffffff') {
+        if (toNum === BROADCAST) {
           const key = `channel:${channel}`;
           const label = channel === 0 ? 'Broadcast — Channel 0' : `Channel ${channel}`;
           pushMessage(key, label, fromName, body, kind);
-        } else if (myNodeHex && toHex === myNodeHex.slice(1)) {
+        } else if (myNodeNum != null && toNum === myNodeNum) {
           // DM addressed to us; thread by sender.
           const key = `node:${fromKey}`;
           const label = `DM — ${fromName} (${fromKey})`;
@@ -818,19 +865,49 @@
       };
 
       // ---- Mic capture ----
+      //
+      // Audio runs off the main thread via AudioWorklet: a small processor
+      // is loaded from an inline blob URL, receives 128-sample blocks on
+      // the audio thread, and posts a copy of each block back to the main
+      // thread. ScriptProcessorNode (deprecated, main-thread) is no longer
+      // used. Mic preprocessing stays off — RNNoise runs on the wasm side.
+      const CAPTURE_WORKLET_SRC = `
+class CaptureProcessor extends AudioWorkletProcessor {
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    // process() reuses its input buffers, so copy before posting.
+    if (ch && ch.length) this.port.postMessage(new Float32Array(ch));
+    return true;
+  }
+}
+registerProcessor('capture', CaptureProcessor);
+`;
+      let captureWorkletUrl = null;
+      function getCaptureWorkletUrl() {
+        if (!captureWorkletUrl) {
+          captureWorkletUrl = URL.createObjectURL(
+            new Blob([CAPTURE_WORKLET_SRC], { type: 'application/javascript' }),
+          );
+        }
+        return captureWorkletUrl;
+      }
+
       let recording = null;
       async function startRecording() {
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
         });
         const ctx = new AudioContext();
+        await ctx.audioWorklet.addModule(getCaptureWorkletUrl());
         const source = ctx.createMediaStreamSource(stream);
-        const proc = ctx.createScriptProcessor(4096, 1, 1);
+        const node = new AudioWorkletNode(ctx, 'capture');
+        // Silent sink keeps the graph pulled — without a downstream node
+        // some engines won't call process() reliably.
         const silent = ctx.createGain(); silent.gain.value = 0;
         const chunks = [];
-        proc.onaudioprocess = (e) => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
-        source.connect(proc); proc.connect(silent); silent.connect(ctx.destination);
-        recording = { stream, ctx, source, proc, silent, chunks, t0: performance.now() };
+        node.port.onmessage = (e) => chunks.push(e.data);
+        source.connect(node); node.connect(silent); silent.connect(ctx.destination);
+        recording = { stream, ctx, source, node, silent, chunks, t0: performance.now() };
         recBtn.textContent = '⏹ Stop';
         recBtn.classList.add('rec');
         const tick = () => {
@@ -843,7 +920,8 @@
       async function stopRecording() {
         const r = recording; recording = null;
         recBtn.textContent = '🎙 Record'; recBtn.classList.remove('rec'); recTimer.textContent = '';
-        r.proc.disconnect(); r.source.disconnect(); r.silent.disconnect();
+        r.node.port.onmessage = null;
+        r.node.disconnect(); r.source.disconnect(); r.silent.disconnect();
         r.stream.getTracks().forEach((t) => t.stop());
         const rate = r.ctx.sampleRate;
         await r.ctx.close();
@@ -891,17 +969,7 @@
             log('Connected. Config handshake in flight…');
             setStatus('Connected', 'connecting');
             connectHint.textContent = 'Connected — waiting for ConfigComplete…';
-            textEl.disabled = false;
-            sendBtn.disabled = false;
-            recBtn.disabled = false;
-            denoiseEl.disabled = false;
-            sendCodecEl.disabled = false;
-            codecModeEl.disabled = false;
-            amrnbModeEl.disabled = false;
-            opusKbpsEl.disabled = false;
-            refreshCodecRows();
-            discoverBtn.hidden = false; // visible once connected, enabled at Ready
-            settingsRefreshBtn.disabled = false;
+            setConnectedUi(true);
             renderChat(); // refresh placeholder text
           } catch (e) {
             log('❌ ' + e);
@@ -909,6 +977,52 @@
             connectBtn.disabled = false;
             connectHint.textContent = 'Click Connect, then pick the serial port.';
           }
+        };
+
+        // Toggle every input that should only be live while a radio is
+        // connected. Called with `true` after a successful connect, and
+        // `false` after disconnect (or to undo a partial connect).
+        function setConnectedUi(on) {
+          textEl.disabled = !on;
+          sendBtn.disabled = !on;
+          recBtn.disabled = !on;
+          denoiseEl.disabled = !on;
+          sendCodecEl.disabled = !on;
+          codecModeEl.disabled = !on;
+          amrnbModeEl.disabled = !on;
+          opusKbpsEl.disabled = !on;
+          settingsRefreshBtn.disabled = !on;
+          discoverBtn.hidden = !on;
+          if (!on) discoverBtn.disabled = true; // re-enabled at next ConfigComplete
+          connectBtn.hidden = on;
+          connectBtn.disabled = on;
+          disconnectBtn.hidden = !on;
+          if (on) refreshCodecRows();
+        }
+
+        disconnectBtn.onclick = async () => {
+          if (!client) return;
+          disconnectBtn.disabled = true;
+          log('Disconnecting…');
+          try {
+            // disconnect() consumes the WebClient on the Rust side; the JS
+            // proxy is freed and any further call would throw.
+            await client.disconnect();
+            log('Disconnected.');
+          } catch (e) {
+            log('disconnect: ' + e);
+          }
+          client = null;
+          disconnectBtn.disabled = false;
+          setConnectedUi(false);
+          setStatus('Disconnected');
+          connectHint.textContent = 'Click Connect, then pick the serial port.';
+          // Reset device state so a reconnect starts fresh.
+          myNodeNum = null; myNodeHex = null; fwVersion = null;
+          knownChannels.clear(); knownNodes.clear();
+          infoCard.hidden = true;
+          renderChat();
+          renderSettings();
         };
 
         const doSend = async () => {
@@ -1126,6 +1240,9 @@
           apply.className = 'apply'; apply.textContent = 'Apply';
           // Don't let Apply clicks toggle the <details>.
           apply.addEventListener('click', (e) => e.stopPropagation());
+          // Map a settings section to the protocol event we expect back
+          // from the radio after a successful SetOwner / SetConfig.
+          const confirmKey = section.key === 'owner' ? 'owner' : `config:${section.key}`;
           apply.onclick = async (e) => {
             e.stopPropagation();
             const dto = {};
@@ -1138,9 +1255,16 @@
             apply.textContent = 'Applying…';
             try {
               await client[section.writeFn](dto);
-              log(`  ⟶ applied ${section.key} config`);
-              apply.textContent = '✓ Sent';
-              setTimeout(() => { apply.textContent = prev; apply.disabled = false; }, 1500);
+              apply.textContent = 'Awaiting confirm…';
+              const confirmed = await waitForApplyConfirm(confirmKey);
+              if (confirmed) {
+                log(`  ⟶ applied ${section.key} config (confirmed by radio)`);
+                apply.textContent = '✓ Confirmed';
+              } else {
+                log(`  ⟶ applied ${section.key} config (no confirmation in 3 s)`);
+                apply.textContent = '⚠ No confirm';
+              }
+              setTimeout(() => { apply.textContent = prev; apply.disabled = false; }, 1800);
             } catch (e) {
               log(`❌ apply ${section.key}: ${e}`);
               apply.textContent = '✗ Failed';
@@ -1218,9 +1342,15 @@
             const prev = apply.textContent; apply.textContent = '…';
             try {
               await client.writeChannel(dto);
-              log(`  ⟶ applied channel ${ch.index}`);
-              apply.textContent = '✓';
-              setTimeout(() => { apply.textContent = prev; apply.disabled = false; }, 1500);
+              const confirmed = await waitForApplyConfirm(`channel:${ch.index}`);
+              if (confirmed) {
+                log(`  ⟶ applied channel ${ch.index} (confirmed by radio)`);
+                apply.textContent = '✓';
+              } else {
+                log(`  ⟶ applied channel ${ch.index} (no confirmation in 3 s)`);
+                apply.textContent = '⚠';
+              }
+              setTimeout(() => { apply.textContent = prev; apply.disabled = false; }, 1800);
             } catch (e) {
               log(`❌ apply channel ${ch.index}: ${e}`);
               apply.textContent = '✗';

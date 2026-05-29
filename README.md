@@ -29,23 +29,27 @@ framing, and ferrying events to JS. That's the payoff of the sans-IO refactor in
 
 ### Voice
 
-Voice messaging works, reusing core's voice pipeline:
+Voice messaging works, reusing core's voice pipeline — and now has reliability parity
+with the desktop client:
 
-- **Codec**: Codec2, **from core** — `voicetastic_core::codec::codec2_encode/decode`,
-  enabled via core's wasm-safe `codec2` feature (the pure-Rust `codec2` crate; no
-  emscripten, no JS codec module, no codec code in this crate). The codec stays a single
-  implementation in core, shared with desktop/Android.
-- **TX** (`WebClient.sendVoice`): mic PCM → Codec2 encode → core `build_message` →
-  per-frame pacing via `voice::tx_policy` + firmware queue backpressure → PRIVATE_APP
-  frames.
-- **RX**: PRIVATE_APP frames → core's sans-IO `VoiceAssembler` → on completion, Codec2
-  decode → PCM handed to the JS playback callback.
+- **Codecs from core.** Codec2 (pure-Rust `codec2` crate, the LoRa-optimal default),
+  AMR-NB, and Opus all run as `voicetastic_core::codec::*` — one codec implementation
+  shared with desktop/Android, no JS codec modules, no codec code in this crate.
+- **TX** (`WebClient.sendVoice`): mic PCM → optional RNNoise denoise (core's `Denoiser`)
+  → selected codec encode → core `build_message` → per-frame pacing via `voice::tx_policy`
+  + firmware queue backpressure → PRIVATE_APP frames. Modem-preset FEC parity is applied
+  via `VoiceFecMode::Auto` (same policy as desktop).
+- **RX**: PRIVATE_APP frames → core's sans-IO `VoiceAssembler` → on completion, decoded
+  with the matching codec → PCM handed to the JS playback callback.
+- **NACK loop**: an in-browser tick driver polls `VoiceAssembler::tick()` every 500 ms
+  to emit RX-side NACKs, and inbound NACKs are serviced by core's `OutgoingVoiceRegistry`
+  for paced retransmits — wire-compatible with the desktop driver.
 - Mic capture + playback are Web Audio (the only JS-side audio glue); everything else is
   core's Rust.
 
-v1 limits: one message per clip (~13 s at 1200 bps), no Reed-Solomon parity, and NACK
-retransmit stays native-only — so voice is best-effort over good links for now. Codec2
-only on the playback path.
+Remaining limit: a single `sendVoice` call still ships one Meshtastic message (~13 s at
+1200 bps Codec2; less at higher bitrates / Opus). Clips that exceed one message need to
+be split — the multi-message sender is not in core yet.
 
 ## Build
 
@@ -79,9 +83,18 @@ console logs each step. Needs Chrome/Edge or Firefox 151+.
 
 ## Next steps
 
-- Make core's `Transport` trait `?Send` on `wasm32` and add a `spawn_local` runtime
-  driver, so `connect_with_transport` (and the full config/message machinery) runs in
-  the browser. This replaces the hand-rolled read loop here.
-- Audio I/O via Web Audio / AudioWorklet.
-- Codec2 as a JS-side WASM module (PCM crosses the boundary).
-- The SPA shell (Vite) on top of these bindings.
+The big architectural moves are done: core was refactored sans-IO, so the browser is a
+real driver (not a bridge) over the same `protocol` / `voice` modules the desktop and
+Android clients use. Open work:
+
+- **Persistent ports.** `navigator.serial.getPorts()` returns previously-granted ports
+  without a picker — wire auto-reconnect for sessions where the user already approved a
+  device.
+- **AudioWorklet capture.** Mic capture currently uses the deprecated
+  `ScriptProcessorNode` (main-thread audio). Move to `AudioWorkletNode` for the same
+  latency story the rest of the audio stack already has.
+- **Multi-message voice clips.** Lift the one-message cap so longer recordings split
+  cleanly into a sequence the receiver reassembles in order. Belongs in core
+  (`voice::*`), shared with desktop/Android.
+- **Deploy story.** Switch the `voicetastic-core` path dep to a git dep so CI and a
+  hosted static build don't need the sibling `voicetastic-desktop` checkout.

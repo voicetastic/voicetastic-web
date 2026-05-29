@@ -31,7 +31,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, future_to_promise};
 
-use crate::events::{emit, event_summary};
+use crate::events::{build_event, emit};
 use crate::serial::{BAUD, frame_serial, next_frame};
 use crate::util::{err, log, rand_u32};
 use crate::voice::{handle_voice, nack_tick_loop};
@@ -48,9 +48,14 @@ pub(crate) const DEFAULT_PACING_MS: u64 = 250;
 /// wasm's single thread. `pub(crate)` so sibling modules (voice, settings)
 /// can carry their own `impl Inner` blocks.
 pub(crate) struct Inner {
-    /// Kept alive so the serial connection isn't dropped.
-    pub(crate) _port: web_sys::SerialPort,
+    /// The serial port handle. Kept alive so the connection persists, and
+    /// closed explicitly by [`WebClient::disconnect`] for a graceful teardown.
+    pub(crate) port: web_sys::SerialPort,
     pub(crate) writer: web_sys::WritableStreamDefaultWriter,
+    /// Inbound stream reader. Held on `Inner` (rather than as a local in
+    /// `read_loop`) so `disconnect()` can cancel it, which causes the loop's
+    /// pending `read()` to resolve with `done: true` and exit cleanly.
+    pub(crate) reader: web_sys::ReadableStreamDefaultReader,
     /// The canonical protocol snapshot — core's `ProtocolState`, exactly as the
     /// native driver uses it.
     pub(crate) state: RefCell<ProtocolState>,
@@ -213,6 +218,28 @@ impl WebClient {
         })
     }
 
+    /// Graceful teardown: cancel the inbound stream, close the writer, and
+    /// close the port. Consumes the `WebClient` — wasm-bindgen marks the JS
+    /// proxy as freed, so any subsequent method call from JS will throw.
+    ///
+    /// The background read loop sees the cancelled reader, exits with
+    /// `Ok(())`, and drops its `Rc<Inner>`. Once this method's future also
+    /// drops `self`, the only remaining `Rc<Inner>` is the NACK tick loop's
+    /// own clone, and its `Rc::strong_count <= 1` check terminates it
+    /// within the next tick (~500 ms).
+    ///
+    /// Each step's error is swallowed: a half-broken connection still needs
+    /// to make as much progress towards closure as possible.
+    #[wasm_bindgen(js_name = disconnect)]
+    pub fn disconnect(self) -> js_sys::Promise {
+        future_to_promise(async move {
+            let _ = JsFuture::from(self.inner.reader.cancel()).await;
+            let _ = JsFuture::from(self.inner.writer.close()).await;
+            let _ = JsFuture::from(self.inner.port.close()).await;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
     // Settings surface (`snapshot`, `writeOwner`, the eight `writeConfig*`s,
     // `writeChannel`, `setFixedPosition`) lives in src/settings.rs as its
     // own `impl WebClient` block. See the `write_config!` macro there for
@@ -242,11 +269,12 @@ pub async fn connect(
         .get_writer()
         .map_err(|e| err(&format!("get_writer: {e:?}")))?;
     let reader: web_sys::ReadableStreamDefaultReader =
-        port.readable().get_reader().unchecked_into();
+        port.readable().get_reader().dyn_into()?;
 
     let inner = Rc::new(Inner {
-        _port: port,
+        port,
         writer,
+        reader,
         state: RefCell::new(ProtocolState::default()),
         next_id: Cell::new(rand_u32()),
         assembler: VoiceAssembler::new(AssemblerConfig::default()),
@@ -260,9 +288,10 @@ pub async fn connect(
     });
 
     // Background inbound loop: read → deframe → core decode → core state/voice.
+    // The reader itself lives on `Inner` so `disconnect()` can cancel it.
     let rx = inner.clone();
     wasm_bindgen_futures::spawn_local(async move {
-        if let Err(e) = read_loop(reader, rx, on_event, on_voice).await {
+        if let Err(e) = read_loop(rx, on_event, on_voice).await {
             log(&format!("serial read loop ended: {e:?}"));
         }
     });
@@ -297,16 +326,17 @@ pub async fn connect(
 }
 
 /// Read frames off the port forever, feeding each through the core decoder and
-/// applying snapshot events to the shared `ProtocolState`.
+/// applying snapshot events to the shared `ProtocolState`. Exits with
+/// `Ok(())` when the reader is cancelled (graceful disconnect) or with `Err`
+/// on transport failure (e.g. the cable was unplugged).
 async fn read_loop(
-    reader: web_sys::ReadableStreamDefaultReader,
     inner: Rc<Inner>,
     on_event: js_sys::Function,
     on_voice: js_sys::Function,
 ) -> Result<(), JsValue> {
     let mut buf: Vec<u8> = Vec::new();
     loop {
-        let result = JsFuture::from(reader.read()).await?;
+        let result = JsFuture::from(inner.reader.read()).await?;
         let done = js_sys::Reflect::get(&result, &JsValue::from_str("done"))?
             .as_bool()
             .unwrap_or(false);
@@ -335,17 +365,18 @@ async fn read_loop(
                             inner.state.borrow_mut().apply(&ev);
                         }
                         match &ev {
-                            // Track queue depth for voice TX backpressure.
+                            // Track queue depth for voice TX backpressure; still
+                            // forward the structured event so the JS log shows it.
                             InboundEvent::QueueStatus(qs) => {
                                 inner.queue_free.set(qs.free);
-                                emit(&on_event, &format!("queue free={}", qs.free));
+                                emit(&on_event, &build_event(&ev, &inner.state.borrow()));
                             }
                             // Voice frames go through core's reassembler; a
                             // completed message is decoded and handed to JS.
                             InboundEvent::Voice(vd) => {
                                 handle_voice(&inner, vd, &on_event, &on_voice);
                             }
-                            _ => emit(&on_event, &event_summary(&ev, &inner.state.borrow())),
+                            _ => emit(&on_event, &build_event(&ev, &inner.state.borrow())),
                         }
                     }
                 }

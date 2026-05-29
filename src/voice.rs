@@ -26,7 +26,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 use web_time::Instant;
 
-use crate::events::emit;
+use crate::events::emit_log;
 use crate::util::{err, log, sleep_ms};
 use crate::{Inner, WebClient};
 
@@ -117,8 +117,16 @@ impl Inner {
             prep.parity_count,
             payload_bytes,
         ));
-        self.send_voice_frames(prep.message_id, prep.total_data, prep.frames, channel, to)
-            .await?;
+        // If the send fails (e.g. port closed mid-burst), evict the registry
+        // entry rather than leaving an orphan that lingers until TTL — no
+        // future NACK on a dead message will ever be servicable.
+        if let Err(e) = self
+            .send_voice_frames(prep.message_id, prep.total_data, prep.frames, channel, to)
+            .await
+        {
+            self.registry.remove(prep.message_id);
+            return Err(e);
+        }
         log("voice: sent");
         Ok(())
     }
@@ -193,14 +201,15 @@ impl WebClient {
 
     /// Pick the codec for outgoing voice: `"codec2"` (default, LoRa-optimal),
     /// `"amrnb"` (Adaptive Multi-Rate Narrowband, telephony interop), or
-    /// `"opus"` (best quality, higher airtime). Any other value is ignored.
-    /// Decode of inbound voice always works for all supported codecs
-    /// regardless of this setting.
+    /// `"opus"` (best quality, higher airtime). Match is case-insensitive
+    /// and tolerates the `amr-nb` hyphenation. Any other value falls back
+    /// to Codec2. Decode of inbound voice always works for all supported
+    /// codecs regardless of this setting.
     #[wasm_bindgen(js_name = setSendCodec)]
     pub fn set_send_codec(&self, codec: &str) {
-        let id: u8 = match codec {
-            "amrnb" | "amr-nb" | "AMR-NB" => 1,
-            "opus" | "Opus" | "OPUS" => 2,
+        let id: u8 = match codec.to_ascii_lowercase().as_str() {
+            "amrnb" | "amr-nb" => 1,
+            "opus" => 2,
             _ => 0,
         };
         self.inner.send_codec.set(id);
@@ -255,7 +264,7 @@ pub(crate) fn handle_voice(
     let from = vd.from.to_string();
     match inner.assembler.accept(&from, vd.to, vd.channel, &vd.payload) {
         AssemblyEvent::Complete(msg) => {
-            emit(
+            emit_log(
                 on_event,
                 &format!(
                     "🎙️ voice complete from {from} to {} ch{} ({} chunks)",
@@ -316,7 +325,7 @@ pub(crate) fn handle_voice(
             received_data,
             total_data,
             ..
-        } => emit(
+        } => emit_log(
             on_event,
             &format!("🎙️ voice {received_data}/{total_data} from {from}"),
         ),
@@ -343,7 +352,7 @@ pub(crate) fn handle_voice(
                         .into_iter()
                         .map(|(idx, b)| (idx, b.to_vec()))
                         .collect();
-                    emit(
+                    emit_log(
                         on_event,
                         &format!(
                             "  ⟶ retransmitting {n} chunk(s) for msg 0x{:x} (NACK from {from})",
@@ -465,6 +474,11 @@ pub(crate) async fn nack_tick_loop(inner: Rc<Inner>) {
         if Rc::strong_count(&inner) <= 1 {
             return;
         }
+        // Opportunistic GC of the outgoing-voice registry. Each `send_voice`
+        // registers an entry so NACKs can drive retransmits; without periodic
+        // pruning the map grows linearly with every clip sent. Cheap — same
+        // tick we're already paying for the assembler.
+        inner.registry.prune_expired();
         let out = inner.assembler.tick();
         for nack in out.nacks {
             let Ok(node) = nack.from.parse::<NodeId>() else {
