@@ -1,6 +1,6 @@
 # voicetastic-web
 
-Browser (WASM) client for [Voicetastic](https://git.cha-sam.re/voicetastic) — async
+Browser (WASM) client for [Voicetastic](https://github.com/voicetastic) — async
 voice messages over Meshtastic, with **no install**: the radio plugs into the user's
 own machine and the page talks to it directly over **Web Serial**.
 
