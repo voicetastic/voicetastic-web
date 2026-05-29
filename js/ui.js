@@ -30,6 +30,23 @@ export function codeEl(text) {
   return c;
 }
 
+/// Canonical Meshtastic node address from a 32-bit id: `!aabbccdd`,
+/// always 8 hex digits, lowercase, leading `!`. This is the only place
+/// in the UI that does the hex formatting — every caller takes the raw
+/// number from the wasm boundary and runs it through here.
+export function nodeAddr(n) {
+  return '!' + ((n >>> 0).toString(16).padStart(8, '0'));
+}
+
+/// Display name for a node: `"Long Name (!aabbccdd)"` when we've seen a
+/// `NodeInfo` for it, otherwise just `"!aabbccdd"`. Source of truth is
+/// `state.knownNodes`, keyed by `nodeAddr(n)`.
+export function nodeDisplay(n) {
+  const addr = nodeAddr(n);
+  const name = state.knownNodes.get(addr);
+  return name && name !== addr ? `${name} (${addr})` : addr;
+}
+
 /// Redraw the Connect-page info card from current `state.*` fields.
 /// Called from event handlers as MyInfo/Metadata/NodeInfo/Channel
 /// events land; everything reads from `state` so no parameters are

@@ -25,6 +25,12 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 getrandom = { version = "0.4.2", features = ["wasm_js"] }
+# getrandom 0.2 is dragged in transitively by core's x25519-dalek (rand_core
+# 0.6). It uses a `js` Cargo feature (not the `getrandom_backend` cfg that 0.3+
+# uses), so we have to enable it here as a wasm32-only direct dep — cargo
+# unifies this with the transitive to give it the browser RNG backend.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 # `Instant` that works on wasm32 (drop-in for std on native). Used to feed
 # core's `VoiceTx` sans-IO state machine — same crate core itself uses, so
 # both sides share one clock type.

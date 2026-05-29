@@ -3,6 +3,7 @@
 //! instead of regex-parsing a human-readable string. `text` is always set
 //! to a one-line summary suitable for the user-visible event log.
 
+use voicetastic_core::meshtastic::ack::AckResult;
 use voicetastic_core::protocol::{InboundEvent, ProtocolState};
 use wasm_bindgen::prelude::*;
 
@@ -22,6 +23,21 @@ fn set_u32(o: &js_sys::Object, k: &str, v: u32) {
 }
 fn set_i32(o: &js_sys::Object, k: &str, v: i32) {
     set(o, k, &JsValue::from_f64(v as f64));
+}
+
+// ---------- address formatting ----------
+
+/// Canonical Meshtastic node address from a 32-bit id: `!aabbccdd`,
+/// always 8 hex digits, lowercase. The broadcast wildcard
+/// (`0xffffffff`) renders as `broadcast` because the literal
+/// `!ffffffff` is too easily confused with a real node. Mirrors the
+/// JS-side `nodeAddr` / `nodeDisplay` helpers in `js/ui.js`.
+fn fmt_node(id: u32) -> String {
+    if id == 0xffff_ffff {
+        "broadcast".to_string()
+    } else {
+        format!("!{:08x}", id)
+    }
 }
 
 // ---------- emit helpers ----------
@@ -64,7 +80,11 @@ pub fn build_event(ev: &InboundEvent, state: &ProtocolState) -> JsValue {
         InboundEvent::MyInfo(i) => {
             set_str(&o, "type", "my_info");
             set_u32(&o, "node_num", i.my_node_num);
-            set_str(&o, "text", &format!("MyNodeInfo node_num=0x{:x}", i.my_node_num));
+            set_str(
+                &o,
+                "text",
+                &format!("MyNodeInfo node_num={}", fmt_node(i.my_node_num)),
+            );
         }
         InboundEvent::NodeInfo(ni) => {
             let name = ni
@@ -79,8 +99,8 @@ pub fn build_event(ev: &InboundEvent, state: &ProtocolState) -> JsValue {
                 &o,
                 "text",
                 &format!(
-                    "NodeInfo 0x{:x} \"{name}\" (known nodes: {})",
-                    ni.num,
+                    "NodeInfo {} \"{name}\" (known nodes: {})",
+                    fmt_node(ni.num),
                     state.nodes.len()
                 ),
             );
@@ -147,8 +167,11 @@ pub fn build_event(ev: &InboundEvent, state: &ProtocolState) -> JsValue {
                 &o,
                 "text",
                 &format!(
-                    "💬 text from 0x{:x} to 0x{:x} ch{}: {}",
-                    t.from, t.to, t.channel, t.text
+                    "💬 text from {} to {} ch{}: {}",
+                    fmt_node(t.from),
+                    fmt_node(t.to),
+                    t.channel,
+                    t.text
                 ),
             );
         }
@@ -161,27 +184,45 @@ pub fn build_event(ev: &InboundEvent, state: &ProtocolState) -> JsValue {
                 &o,
                 "text",
                 &format!(
-                    "data port={} from=0x{:x} ({} bytes)",
+                    "data port={} from={} ({} bytes)",
                     d.portnum,
-                    d.from,
+                    fmt_node(d.from),
                     d.payload.len()
                 ),
             );
         }
         InboundEvent::Voice(vd) => {
             // The real voice flow goes through `on_voice`; this is just a
-            // log line so the user can see the frame scroll past.
+            // log line so the user can see the frame scroll past. NodeId's
+            // Display impl already produces `!aabbccdd` form.
             set_str(&o, "type", "log");
             set_str(
                 &o,
                 "text",
-                &format!("🎙️ voice from {:?} ({} bytes)", vd.from, vd.payload.len()),
+                &format!("🎙️ voice from {} ({} bytes)", vd.from, vd.payload.len()),
             );
         }
         InboundEvent::QueueStatus(qs) => {
             set_str(&o, "type", "queue_status");
             set_u32(&o, "free", qs.free);
             set_str(&o, "text", &format!("queue free={}", qs.free));
+        }
+        InboundEvent::AckOrNak { request_id, result } => {
+            // Firmware-reported delivery resolution for an outbound DM
+            // (any `want_ack` send). The web client doesn't track acks
+            // by request_id today, so this is informational — surface a
+            // structured event so a future ack-tracked send UI can wire
+            // in without a wasm change.
+            let (status, summary) = match result {
+                AckResult::Delivered => ("delivered", "delivered".to_string()),
+                AckResult::Failed(e) => ("failed", format!("failed: {e:?}")),
+                AckResult::TimedOut => ("timed_out", "timed out".to_string()),
+                AckResult::Cancelled => ("cancelled", "cancelled".to_string()),
+            };
+            set_str(&o, "type", "ack_or_nak");
+            set_u32(&o, "request_id", *request_id);
+            set_str(&o, "status", status);
+            set_str(&o, "text", &format!("ack id={request_id:#010x}: {summary}"));
         }
     }
     o.into()

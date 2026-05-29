@@ -334,18 +334,24 @@ impl WebClient {
 /// Feed one voice frame to the assembler; on completion decode + emit to JS.
 pub(crate) fn handle_voice(
     inner: &Rc<Inner>,
-    vd: &voicetastic_core::radio_service::VoiceData,
+    vd: &voicetastic_core::voice::types::VoiceData,
     on_event: &js_sys::Function,
     on_voice: &js_sys::Function,
 ) {
-    let from = vd.from.to_string();
-    match inner.assembler.accept(&from, vd.to, vd.channel, &vd.payload) {
+    let from_key = vd.from.to_string();
+    let from_num = vd.from.as_u32();
+    match inner.assembler.accept(&from_key, vd.to, vd.channel, &vd.payload) {
         AssemblyEvent::Complete(msg) => {
+            let to_num = voice_dest_to_u32(&msg.to);
+            let to_label = if to_num == 0xffff_ffff {
+                "broadcast".to_string()
+            } else {
+                format!("!{to_num:08x}")
+            };
             emit_log(
                 on_event,
                 &format!(
-                    "🎙️ voice complete from {from} to {} ch{} ({} chunks)",
-                    voice_dest_str(&msg.to),
+                    "🎙️ voice complete from {from_key} to {to_label} ch{} ({} chunks)",
                     msg.channel,
                     msg.total_data
                 ),
@@ -354,15 +360,14 @@ pub(crate) fn handle_voice(
             // AMR-NB and Opus go through their vendored emscripten wasms via
             // JS shims, which are async — those branches spawn local futures
             // and feed the resulting PCM back to `on_voice` when it lands.
-            let to_str = voice_dest_str(&msg.to);
             let channel = msg.channel;
             let codec_id = msg.codec;
             match msg.codec {
                 VoiceCodec::Codec2 => emit_voice_or_log(
                     &codec2_decode(&msg.audio, msg.codec_param),
                     on_voice,
-                    &from,
-                    &to_str,
+                    from_num,
+                    to_num,
                     channel,
                     codec_id,
                 ),
@@ -370,12 +375,10 @@ pub(crate) fn handle_voice(
                     let payload = msg.audio.clone();
                     let codec_param = msg.codec_param;
                     let on_voice = on_voice.clone();
-                    let from = from.clone();
-                    let to_str = to_str.clone();
                     wasm_bindgen_futures::spawn_local(async move {
                         match opus_wasm_decode(&payload, codec_param).await {
                             Ok((pcm, rate)) => emit_voice(
-                                &on_voice, &pcm, rate, &from, &to_str, channel, codec_id,
+                                &on_voice, &pcm, rate, from_num, to_num, channel, codec_id,
                             ),
                             Err(e) => log(&format!("Opus decode failed: {e:?}")),
                         }
@@ -384,12 +387,10 @@ pub(crate) fn handle_voice(
                 VoiceCodec::AmrNb => {
                     let payload = msg.audio.clone();
                     let on_voice = on_voice.clone();
-                    let from = from.clone();
-                    let to_str = to_str.clone();
                     wasm_bindgen_futures::spawn_local(async move {
                         match amrnb_decode(&payload).await {
                             Ok((pcm, rate)) => emit_voice(
-                                &on_voice, &pcm, rate, &from, &to_str, channel, codec_id,
+                                &on_voice, &pcm, rate, from_num, to_num, channel, codec_id,
                             ),
                             Err(e) => log(&format!("AMR-NB decode failed: {e:?}")),
                         }
@@ -404,7 +405,7 @@ pub(crate) fn handle_voice(
             ..
         } => emit_log(
             on_event,
-            &format!("🎙️ voice {received_data}/{total_data} from {from}"),
+            &format!("🎙️ voice {received_data}/{total_data} from {from_key}"),
         ),
         AssemblyEvent::Rejected(e) => log(&format!("voice rejected: {e}")),
         AssemblyEvent::Nack(nack) => {
@@ -432,7 +433,7 @@ pub(crate) fn handle_voice(
                     emit_log(
                         on_event,
                         &format!(
-                            "  ⟶ retransmitting {n} chunk(s) for msg 0x{:x} (NACK from {from})",
+                            "  ⟶ retransmitting {n} chunk(s) for msg 0x{:x} (NACK from {from_key})",
                             nack.message_id
                         ),
                     );
@@ -467,18 +468,19 @@ pub(crate) fn handle_voice(
 /// in the right thread:
 ///
 /// ```ts
-/// { pcm: Float32Array, rate: number, from: string, to: string,
+/// { pcm: Float32Array, rate: number, from: number, to: number,
 ///   channel: number, codec: string, duration_ms: number }
 /// ```
 ///
-/// `to` follows the same `0x...` / `0xffffffff` convention used for text
-/// events — see [`voice_dest_str`].
+/// `from` is the sender's raw 32-bit node id; `to` is either the recipient's
+/// node id or `0xffffffff` for broadcast. The JS side formats both for
+/// display via one canonical helper — no string munging at the boundary.
 pub(crate) fn emit_voice(
     on_voice: &js_sys::Function,
     pcm: &[f32],
     rate: u32,
-    from: &str,
-    to: &str,
+    from_num: u32,
+    to_num: u32,
     channel: u32,
     codec: VoiceCodec,
 ) {
@@ -491,8 +493,8 @@ pub(crate) fn emit_voice(
     let detail = js_sys::Object::new();
     let _ = js_sys::Reflect::set(&detail, &"pcm".into(), &arr.into());
     let _ = js_sys::Reflect::set(&detail, &"rate".into(), &JsValue::from_f64(rate as f64));
-    let _ = js_sys::Reflect::set(&detail, &"from".into(), &JsValue::from_str(from));
-    let _ = js_sys::Reflect::set(&detail, &"to".into(), &JsValue::from_str(to));
+    let _ = js_sys::Reflect::set(&detail, &"from".into(), &JsValue::from_f64(from_num as f64));
+    let _ = js_sys::Reflect::set(&detail, &"to".into(), &JsValue::from_f64(to_num as f64));
     let _ = js_sys::Reflect::set(&detail, &"channel".into(), &JsValue::from_f64(channel as f64));
     let _ = js_sys::Reflect::set(&detail, &"codec".into(), &JsValue::from_str(codec_name(codec)));
     let _ = js_sys::Reflect::set(&detail, &"duration_ms".into(), &JsValue::from_f64(duration_ms));
@@ -503,13 +505,13 @@ pub(crate) fn emit_voice(
 fn emit_voice_or_log(
     decoded: &Result<(Vec<f32>, u32), voicetastic_core::codec::CodecError>,
     on_voice: &js_sys::Function,
-    from: &str,
-    to: &str,
+    from_num: u32,
+    to_num: u32,
     channel: u32,
     codec: VoiceCodec,
 ) {
     match decoded {
-        Ok((pcm, rate)) => emit_voice(on_voice, pcm, *rate, from, to, channel, codec),
+        Ok((pcm, rate)) => emit_voice(on_voice, pcm, *rate, from_num, to_num, channel, codec),
         Err(e) => log(&format!("voice decode failed: {e}")),
     }
 }
@@ -523,15 +525,15 @@ fn codec_name(codec: VoiceCodec) -> &'static str {
     }
 }
 
-/// Render a `VoiceDestination` as the same `0x...`-hex format we use for
-/// node IDs in event lines, with `0xffffffff` standing in for broadcast — so
-/// the JS chat router can apply the exact same broadcast-vs-DM rule it uses
-/// for IncomingText.
-fn voice_dest_str(dest: &voicetastic_core::voice::VoiceDestination) -> String {
+/// Collapse a `VoiceDestination` to a raw 32-bit id — broadcast becomes
+/// `0xffffffff` (matching the firmware's BROADCAST_ADDR), unicast is the
+/// node's own id. The JS side classifies broadcast-vs-DM with the same
+/// `to === 0xffffffff` check it uses for inbound text events.
+fn voice_dest_to_u32(dest: &voicetastic_core::voice::VoiceDestination) -> u32 {
     use voicetastic_core::voice::VoiceDestination::*;
     match dest {
-        Broadcast => "0xffffffff".to_string(),
-        Node(id) => format!("0x{:x}", id.as_u32()),
+        Broadcast => 0xffff_ffff,
+        Node(id) => id.as_u32(),
     }
 }
 

@@ -4,7 +4,7 @@
 // side and arrives via `routeIncoming` (text) or `onVoice` (voice).
 
 import { state } from './state.js';
-import { log } from './ui.js';
+import { log, nodeAddr, nodeDisplay } from './ui.js';
 
 // ---------- thread state ----------
 //
@@ -153,15 +153,15 @@ function parseThread(key) {
 // to us, drop otherwise (flood-routed traffic destined for another node).
 const BROADCAST = 0xffffffff;
 export function routeIncoming(fromNum, toNum, channel, body, kind) {
-  const fromKey = '!' + fromNum.toString(16);
-  const fromName = state.knownNodes.get(fromKey) || fromKey;
+  const fromAddr = nodeAddr(fromNum);
+  const fromName = nodeDisplay(fromNum);
   if (toNum === BROADCAST) {
     const key = `channel:${channel}`;
     const label = channel === 0 ? 'Broadcast — Channel 0' : `Channel ${channel}`;
     pushMessage(key, label, fromName, body, kind);
   } else if (state.myNodeNum != null && toNum === state.myNodeNum) {
-    const key = `node:${fromKey}`;
-    const label = `DM — ${fromName} (${fromKey})`;
+    const key = `node:${fromAddr}`;
+    const label = `DM — ${fromName}`;
     pushMessage(key, label, fromName, body, kind);
   }
 }
@@ -222,10 +222,10 @@ function fmtDuration(ms) {
 /// thread as a clickable voice row.
 export function onVoice(detail) {
   const { pcm, rate, from, to, channel, codec, duration_ms } = detail;
-  const fromHex = from.startsWith('0x') ? from.slice(2) : from;
-  const toHex = to.startsWith('0x') ? to.slice(2) : to;
-  const fromKey = '!' + fromHex;
-  const fromName = state.knownNodes.get(fromKey) || fromKey;
+  // `from` / `to` arrive as raw u32s from the wasm side; nodeAddr /
+  // nodeDisplay format them once. No munging here.
+  const fromAddr = nodeAddr(from);
+  const fromName = nodeDisplay(from);
   const voiceId = `v${++voiceSeq}`;
   const voiceMsg = {
     who: fromName,
@@ -237,20 +237,20 @@ export function onVoice(detail) {
     duration_ms,
     codec,
   };
-  if (toHex === 'ffffffff') {
+  if (to === BROADCAST) {
     const key = `channel:${channel}`;
     const label = channel === 0 ? 'Broadcast — Channel 0' : `Channel ${channel}`;
     ensureThread(key, label);
     threads.get(key).messages.push(voiceMsg);
     if (threadEl.value === key) renderChat();
-  } else if (state.myNodeHex && toHex === state.myNodeHex.slice(1)) {
-    const key = `node:${fromKey}`;
-    const label = `DM — ${fromName} (${fromKey})`;
+  } else if (state.myNodeNum != null && to === state.myNodeNum) {
+    const key = `node:${fromAddr}`;
+    const label = `DM — ${fromName}`;
     ensureThread(key, label);
     threads.get(key).messages.push(voiceMsg);
     if (threadEl.value === key) renderChat();
   } else {
-    log(`🎙️ voice from ${fromName} not addressed to us (to=${to})`);
+    log(`🎙️ voice from ${fromName} not addressed to us (to=${nodeAddr(to)})`);
   }
   log(`  ⏵ voice from ${fromName} ready (${fmtDuration(duration_ms)}, ${codec})`);
 }

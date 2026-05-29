@@ -360,11 +360,22 @@ async fn read_loop(
             if payload.is_empty() {
                 continue; // resync marker
             }
-            // Snapshot the one bit the decoder needs from current state.
-            let ctx = InboundCtx {
-                my_node_num: inner.state.borrow().my_info.as_ref().map(|i| i.my_node_num),
+            // Hold the immutable borrow for the duration of decode — the
+            // ctx carries `&state.nodes`. Drop it before the apply loop
+            // below mutably borrows. `our_private_key` is intentionally
+            // `None`: PKC DM decrypt isn't wired in the browser yet, so
+            // PKC-encrypted packets that bypassed firmware decrypt remain
+            // unreadable here (same behaviour as before the PKC work).
+            let events = {
+                let state = inner.state.borrow();
+                let ctx = InboundCtx {
+                    my_node_num: state.my_info.as_ref().map(|i| i.my_node_num),
+                    our_private_key: None,
+                    nodes: &state.nodes,
+                };
+                protocol::decode_inbound(&payload, &ctx)
             };
-            match protocol::decode_inbound(&payload, &ctx) {
+            match events {
                 Ok(events) => {
                     for ev in events {
                         if ev.is_snapshot() {

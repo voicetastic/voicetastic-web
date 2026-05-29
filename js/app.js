@@ -125,19 +125,22 @@ if (!('serial' in navigator)) {
 
   disconnectBtn.onclick = async () => {
     if (!state.client) return;
+    // Tear down the JS-side state up front, before the awaited
+    // disconnect — `disconnect()` consumes the WebClient on the Rust
+    // side, so any sendText/sendVoice that lands between the await
+    // resolving and the UI-gate update would hit a freed proxy.
+    const client = state.client;
+    state.client = null;
     disconnectBtn.disabled = true;
+    setConnectedUi(false);
     log('Disconnecting…');
     try {
-      // disconnect() consumes the WebClient on the Rust side; the JS
-      // proxy is freed and any further call would throw.
-      await state.client.disconnect();
+      await client.disconnect();
       log('Disconnected.');
     } catch (e) {
       log('disconnect: ' + e);
     }
-    state.client = null;
     disconnectBtn.disabled = false;
-    setConnectedUi(false);
     setStatus('Disconnected');
     connectHint.textContent = 'Click Connect, then pick the serial port.';
     resetDeviceState();
