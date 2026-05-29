@@ -15,8 +15,15 @@ crate-type = ["cdylib", "rlib"]
 # (protocol), voice framing + reassembly (voice::build_message / VoiceAssembler),
 # pacing (voice::tx_policy), and the Codec2 codec (codec::codec2_encode/decode,
 # via the wasm-safe `codec2` feature — no Opus/C deps). No native transports/
-# tokio (default-features off). Path dep for now; switch to a git dep later.
-voicetastic-core = { path = "../voicetastic-desktop/crates/voicetastic-core", default-features = false, features = ["codec2", "denoise", "opus-wasm", "amrnb-wasm"] }
+# tokio (default-features off).
+#
+# Pinned git dep against the GitHub-hosted workspace — no sibling checkout
+# needed on CI / fresh clones. For local development against an adjacent
+# checkout, swap the line below for:
+#   voicetastic-core = { path = "../voicetastic-desktop/crates/voicetastic-core",
+#                        default-features = false,
+#                        features = ["codec2", "denoise", "opus-wasm", "amrnb-wasm"] }
+voicetastic-core = { git = "https://github.com/voicetastic/voicetastic-core.git", rev = "612e47b56f4dc87c30f881526ebaef8dcba4ea67", default-features = false, features = ["codec2", "denoise", "opus-wasm", "amrnb-wasm"] }
 
 # Same prost as core (0.14) so the generated `proto` types share one trait impl.
 prost = "0.14"
