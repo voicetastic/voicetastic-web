@@ -400,6 +400,7 @@ function renderOneChannel(ch) {
 
 let settingsCardsEl, settingsRefreshBtn, settingsHintEl;
 let denoiseEl, sendCodecEl, codecModeEl, amrnbModeEl, opusKbpsEl;
+let fecModeEl, nackModeEl;
 
 /// Wire up DOM refs + Audio category change handlers. Called once at
 /// startup by app.js.
@@ -417,6 +418,8 @@ export function initSettings() {
   codecModeEl = document.getElementById('codec-mode');
   amrnbModeEl = document.getElementById('amrnb-mode');
   opusKbpsEl = document.getElementById('opus-kbps');
+  fecModeEl = document.getElementById('fec-mode');
+  nackModeEl = document.getElementById('nack-mode');
 
   denoiseEl.onchange = () => {
     if (!state.client) return;
@@ -447,6 +450,16 @@ export function initSettings() {
     log(`send codec set to ${sendCodecEl.value}`);
     refreshCodecRows();
   };
+  fecModeEl.onchange = () => {
+    if (!state.client) return;
+    state.client.setFecMode(fecModeEl.value);
+    log(`FEC parity set to ${fecModeEl.options[fecModeEl.selectedIndex].text}`);
+  };
+  nackModeEl.onchange = () => {
+    if (!state.client) return;
+    state.client.setNackMode(nackModeEl.value);
+    log(`NACK policy set to ${nackModeEl.options[nackModeEl.selectedIndex].text}`);
+  };
 }
 
 /// Show only the mode/bitrate dropdown for the currently-selected send
@@ -466,6 +479,8 @@ export function setAudioControlsEnabled(on) {
   codecModeEl.disabled = !on;
   amrnbModeEl.disabled = !on;
   opusKbpsEl.disabled = !on;
+  fecModeEl.disabled = !on;
+  nackModeEl.disabled = !on;
   settingsRefreshBtn.disabled = !on;
   if (on) refreshCodecRows();
 }

@@ -18,7 +18,7 @@ use voicetastic_core::node::NodeId;
 use voicetastic_core::ports::PRIVATE_APP;
 use voicetastic_core::protocol;
 use voicetastic_core::service::modem_preset_from_proto;
-use voicetastic_core::settings::api::VoiceFecMode;
+use voicetastic_core::settings::api::{VoiceFecMode, VoiceNackMode};
 use voicetastic_core::voice::{
     AssemblyEvent, VoiceCodec, VoiceTx, VoiceTxAction, prepare_voice_send,
 };
@@ -29,6 +29,43 @@ use web_time::Instant;
 use crate::events::emit_log;
 use crate::util::{err, log, sleep_ms};
 use crate::{Inner, WebClient};
+
+/// Map the numeric id stored on `Inner.fec_mode` to the core enum.
+/// 0 = Auto (default), 1 = Off, 2 = Light, 3 = Medium, 4 = Heavy. Any
+/// out-of-range value falls back to Auto.
+pub(crate) fn fec_mode_from_u8(id: u8) -> VoiceFecMode {
+    match id {
+        1 => VoiceFecMode::Off,
+        2 => VoiceFecMode::Light,
+        3 => VoiceFecMode::Medium,
+        4 => VoiceFecMode::Heavy,
+        _ => VoiceFecMode::Auto,
+    }
+}
+
+/// Map a JS-side string (the setter argument) to the numeric id we store.
+/// Unknown values fall back to 0 (Auto), matching the codec setters'
+/// pattern.
+fn fec_mode_id_from_str(s: &str) -> u8 {
+    match s {
+        "off" | "Off" | "OFF" => 1,
+        "light" | "Light" | "LIGHT" => 2,
+        "medium" | "Medium" | "MEDIUM" => 3,
+        "heavy" | "Heavy" | "HEAVY" => 4,
+        _ => 0, // auto
+    }
+}
+
+/// Map a JS-side string to the [`VoiceNackMode`] variant. Unknown
+/// strings fall back to Auto.
+fn nack_mode_from_str(s: &str) -> VoiceNackMode {
+    match s {
+        "off" | "Off" | "OFF" => VoiceNackMode::Off,
+        "conservative" | "Conservative" | "CONSERVATIVE" => VoiceNackMode::Conservative,
+        "aggressive" | "Aggressive" | "AGGRESSIVE" => VoiceNackMode::Aggressive,
+        _ => VoiceNackMode::Auto,
+    }
+}
 
 // =============================================================================
 // Send path — methods on Inner that the WebClient `sendVoice` wraps.
@@ -103,7 +140,7 @@ impl Inner {
             .and_then(|l| modem_preset_from_proto(l.modem_preset));
         let payload_bytes = payload.len();
         let prep =
-            prepare_voice_send(payload, codec, codec_param, preset, to.is_none(), VoiceFecMode::Auto)
+            prepare_voice_send(payload, codec, codec_param, preset, to.is_none(), fec_mode_from_u8(self.fec_mode.get()))
                 .map_err(|e| err(&format!("prepare voice: {e}")))?;
         // Register before sending so an early NACK lands in the registry
         // (its `pending_chunks` is seeded to {0..total_data} so overlapping
@@ -229,6 +266,46 @@ impl WebClient {
     #[wasm_bindgen(js_name = setOpusKbps)]
     pub fn set_opus_kbps(&self, kbps: u8) {
         self.inner.opus_kbps.set(kbps.clamp(6, 128));
+    }
+
+    /// Sender-side FEC parity policy: `"auto"` (default, picks parity by
+    /// destination + preset), `"off"` (no parity, rely on NACK), `"light"`
+    /// (~10 % parity), `"medium"` (~25 %), `"heavy"` (~50 %, recommended
+    /// for broadcast / long-range). Unknown values fall back to Auto.
+    /// Takes effect on the next `sendVoice`.
+    #[wasm_bindgen(js_name = setFecMode)]
+    pub fn set_fec_mode(&self, mode: &str) {
+        self.inner.fec_mode.set(fec_mode_id_from_str(mode));
+    }
+
+    /// Receiver-side NACK policy: `"auto"` (default, picks window/backoff/
+    /// cap by preset), `"off"` (never NACK; rely on FEC), `"conservative"`
+    /// (long quiet windows + slow round growth), `"aggressive"` (short
+    /// windows + many rounds). Unknown values fall back to Auto.
+    ///
+    /// Resolved against the radio's current LoRa preset and pushed to the
+    /// running `VoiceAssembler` via `update_config` — no reconnect needed.
+    /// Broadcast traffic is always treated as `Off` regardless of this
+    /// setting (the assembler short-circuits broadcast NACK emission so a
+    /// chatty channel isn't flooded with NACKs from every listener).
+    #[wasm_bindgen(js_name = setNackMode)]
+    pub fn set_nack_mode(&self, mode: &str) {
+        let nack = nack_mode_from_str(mode);
+        let preset = self
+            .inner
+            .state
+            .borrow()
+            .lora
+            .as_ref()
+            .and_then(|l| modem_preset_from_proto(l.modem_preset));
+        let params = nack.resolve(preset);
+        if let Err(reason) = self.inner.assembler.update_config(|cfg| {
+            cfg.nack_window = params.nack_window;
+            cfg.nack_backoff_base = params.backoff_base;
+            cfg.max_nack_rounds = params.max_nack_rounds;
+        }) {
+            log(&format!("nack mode rejected: {reason}"));
+        }
     }
 
     /// Send a voice clip: mono f32 PCM at `in_rate` Hz, encoded with the

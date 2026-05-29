@@ -89,6 +89,11 @@ pub(crate) struct Inner {
     /// Default 12 kbps matches the desktop GUI's `OPUS_BITRATE` constant —
     /// good VoIP quality at modest airtime. Range 6..=128 per RFC 6716.
     pub(crate) opus_kbps: Cell<u8>,
+    /// Sender-side FEC parity policy. Numeric so it crosses wasm-bindgen
+    /// directly. 0 = Auto (the recommended default), 1 = Off, 2 = Light,
+    /// 3 = Medium, 4 = Heavy. Mapped to [`VoiceFecMode`] per-message in
+    /// `Inner::send_voice` via [`voice::fec_mode_from_u8`].
+    pub(crate) fec_mode: Cell<u8>,
 }
 
 impl Inner {
@@ -285,6 +290,7 @@ pub async fn connect(
         send_codec: Cell::new(0), // 0 = Codec2
         amrnb_mode: Cell::new(5), // MR795 — same default as desktop GUI
         opus_kbps: Cell::new(12), // 12 kbps — same default as desktop GUI
+        fec_mode: Cell::new(0), // 0 = Auto — recommended default
     });
 
     // Background inbound loop: read → deframe → core decode → core state/voice.
