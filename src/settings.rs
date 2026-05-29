@@ -30,6 +30,11 @@ pub(crate) struct Snapshot {
     pub display: Option<DisplayDto>,
     pub bluetooth: Option<BluetoothDto>,
     pub channels: Vec<ChannelDto>,
+    /// Radio's last-known position, read from its own NodeInfo. `None`
+    /// until the radio reports a position (e.g. no GPS fix and no fixed
+    /// position set). Used by the Settings UI to pre-populate the lat/
+    /// lon/alt inputs that drive `setFixedPosition`.
+    pub current_position: Option<FixedPositionDto>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -137,6 +142,20 @@ pub(crate) struct FixedPositionDto {
 // ---------- builders: ProtocolState -> Snapshot ----------
 
 pub(crate) fn build_snapshot(state: &ProtocolState) -> Snapshot {
+    // Own NodeInfo's `position`, when present, is the source of truth for
+    // the radio's current lat/lon/alt. Missing fields default to 0 so the
+    // UI can still render numeric inputs without juggling Option<i32>s
+    // across the wasm-bindgen boundary.
+    let current_position = state
+        .my_info
+        .as_ref()
+        .and_then(|i| state.nodes.get(&i.my_node_num))
+        .and_then(|n| n.position.as_ref())
+        .map(|p| FixedPositionDto {
+            latitude_i: p.latitude_i.unwrap_or(0),
+            longitude_i: p.longitude_i.unwrap_or(0),
+            altitude: p.altitude.unwrap_or(0),
+        });
     Snapshot {
         my_node_num: state.my_info.as_ref().map(|i| i.my_node_num),
         fw: state.metadata.as_ref().map(|m| m.firmware_version.clone()),
@@ -149,6 +168,7 @@ pub(crate) fn build_snapshot(state: &ProtocolState) -> Snapshot {
         display: state.display.as_ref().map(display_to_dto),
         bluetooth: state.bluetooth.as_ref().map(bluetooth_to_dto),
         channels: state.channels.iter().map(channel_to_dto).collect(),
+        current_position,
     }
 }
 
