@@ -12,7 +12,7 @@
 // event or rejects via timeout.
 
 import { state } from './state.js';
-import { log, setStatus, updateInfoCard } from './ui.js';
+import { log, nodeAddr, setStatus, updateInfoCard } from './ui.js';
 import { ensureThread, routeIncoming } from './chat.js';
 
 // ---------- callbacks owned by app.js ----------
@@ -59,7 +59,7 @@ export function handleEvent(ev) {
   switch (ev.type) {
     case 'my_info': {
       state.myNodeNum = ev.node_num;
-      state.myNodeHex = '!' + ev.node_num.toString(16);
+      state.myNodeHex = nodeAddr(ev.node_num);
       updateInfoCard();
       break;
     }
@@ -76,7 +76,7 @@ export function handleEvent(ev) {
       break;
     }
     case 'node_info': {
-      const hex = '!' + ev.node_num.toString(16);
+      const hex = nodeAddr(ev.node_num);
       const name = ev.long_name || hex;
       state.knownNodes.set(hex, name);
       if (hex !== state.myNodeHex) ensureThread(`node:${hex}`, `DM — ${name} (${hex})`);
