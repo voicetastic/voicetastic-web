@@ -217,6 +217,21 @@ input[type='text']:focus, select:focus { outline: none; border-color: var(--acce
 .msg.out .who { color: var(--accent); }
 .msg.system .who { color: var(--warn); }
 .msg .body { word-break: break-word; }
+.msg .msg-status {
+  color: var(--text-muted);
+  font-size: 0.9em;
+  margin-left: auto;
+  padding-left: 0.5rem;
+  cursor: help;
+}
+
+.nodes-list table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+.nodes-list th, .nodes-list td {
+  text-align: left; padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+.nodes-list th { color: var(--text-muted); font-weight: 600; }
+.nodes-list .id { color: var(--text-muted); font-family: ui-monospace, monospace; }
 .voice-player { display: inline-flex; align-items: center; gap: 0.5rem; }
 .voice-player::before { content: '🎙️'; }
 .voice-play {

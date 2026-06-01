@@ -135,13 +135,13 @@ impl Inner {
         Ok(())
     }
 
-    async fn send_text(&self, text: &str, channel: u32, to: Option<u32>) -> Result<(), JsValue> {
+    async fn send_text(&self, text: &str, channel: u32, to: Option<u32>) -> Result<u32, JsValue> {
         let id = self.alloc_id();
         let payload = protocol::text_packet(id, text, channel, to)
             .map_err(|e| err(&format!("build text: {e}")))?;
         self.write_payload(payload).await?;
         log(&format!("sent text id={id}"));
-        Ok(())
+        Ok(id)
     }
 
     /// Build and write an admin message (config write, fixed-position, etc.)
@@ -197,8 +197,11 @@ impl WebClient {
     pub fn send_text(&self, text: String, channel: u32, to: Option<u32>) -> js_sys::Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            inner.send_text(&text, channel, to).await?;
-            Ok(JsValue::UNDEFINED)
+            let id = inner.send_text(&text, channel, to).await?;
+            // Resolve with the mesh packet id so JS can correlate the
+            // outgoing message with the eventual `ack_or_nak` event and
+            // flip its delivery-status icon.
+            Ok(JsValue::from(id))
         })
     }
 

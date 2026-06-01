@@ -14,7 +14,7 @@ import init, { connect } from '../pkg/voicetastic_web.js';
 import { state, resetDeviceState } from './state.js';
 import { log, setStatus } from './ui.js';
 import { handleEvent, setEventHooks } from './events.js';
-import { initChat, onVoice, renderChat, clearThreads, setChatEnabled } from './chat.js';
+import { initChat, onVoice, renderChat, clearThreads, setChatEnabled, renderNodes } from './chat.js';
 import { initSettings, renderSettings, setAudioControlsEnabled } from './settings.js';
 
 // ---------- DOM refs owned by this module ----------
@@ -180,6 +180,7 @@ if (!('serial' in navigator)) {
     infoCard.hidden = true;
     clearThreads();
     renderSettings();
+    renderNodes();
   };
 
   discoverBtn.onclick = async () => {

@@ -31,9 +31,11 @@ export function initChat() {
     if (!text || !state.client) return;
     const dest = parseThread(threadEl.value);
     try {
-      await state.client.sendText(text, dest.channel, dest.to);
+      // sendText now resolves with the mesh packet id; pass it through
+      // so the message bubble can show its delivery-status icon.
+      const id = await state.client.sendText(text, dest.channel, dest.to);
       log('  ⟶ sent: ' + text);
-      pushMessage(threadEl.value, threads.get(threadEl.value).label, 'You', text, 'out');
+      pushMessage(threadEl.value, threads.get(threadEl.value).label, 'You', text, 'out', id);
       textEl.value = '';
     } catch (e) { log('❌ send failed: ' + e); }
   };
@@ -94,10 +96,85 @@ export function ensureThread(key, label) {
 }
 
 /// Push a message into a thread + re-render if it's currently selected.
-export function pushMessage(threadKey, threadLabel, who, body, kind) {
+/// `packetId` (optional) is the mesh packet id returned by `sendText`;
+/// when present, outgoing messages start with `status: 'pending'` and
+/// flip to delivered/failed/timed_out via `setMessageStatus` when the
+/// matching `ack_or_nak` event lands.
+export function pushMessage(threadKey, threadLabel, who, body, kind, packetId) {
   ensureThread(threadKey, threadLabel);
-  threads.get(threadKey).messages.push({ who, body, kind });
+  const msg = { who, body, kind };
+  if (typeof packetId === 'number') {
+    msg.packetId = packetId;
+    msg.status = 'pending';
+  }
+  threads.get(threadKey).messages.push(msg);
   if (threadEl.value === threadKey) renderChat();
+}
+
+/// Flip an outgoing message's delivery-status icon. Called from
+/// events.js when an `ack_or_nak` lands. No-op if no message in any
+/// thread has that packet id (e.g. an ack arriving for a message we
+/// sent before the page loaded).
+export function setMessageStatus(packetId, status) {
+  for (const t of threads.values()) {
+    for (const m of t.messages) {
+      if (m.packetId === packetId) {
+        m.status = status;
+        renderChat();
+        return;
+      }
+    }
+  }
+}
+
+/// Re-render the Chat tab's Nodes panel from `client.listNodes()`. Called
+/// on the relevant events (`node_info`, `config_complete`, `disconnect`)
+/// so the list stays in sync without polling.
+export function renderNodes() {
+  const listEl = document.getElementById('nodes-list');
+  const countEl = document.getElementById('nodes-count');
+  if (!listEl) return;
+  if (!state.client) {
+    listEl.innerHTML = '<div class="placeholder muted">Connect a radio to load the node list.</div>';
+    if (countEl) countEl.textContent = '(0)';
+    return;
+  }
+  let rows;
+  try { rows = state.client.listNodes(); }
+  catch (e) {
+    listEl.innerHTML = `<div class="placeholder muted">listNodes failed: ${e}</div>`;
+    return;
+  }
+  if (countEl) countEl.textContent = `(${rows.length})`;
+  if (rows.length === 0) {
+    listEl.innerHTML = '<div class="placeholder muted">No peers heard yet.</div>';
+    return;
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const fmtAge = (lh) => {
+    if (!lh) return '—';
+    const a = Math.max(0, now - lh);
+    if (a < 60) return `${a}s ago`;
+    if (a < 3600) return `${Math.floor(a / 60)}m ago`;
+    if (a < 86400) return `${Math.floor(a / 3600)}h ago`;
+    return `${Math.floor(a / 86400)}d ago`;
+  };
+  const fmtBat = (b) => b == null ? '—' : (b === 101 ? 'AC' : `${b}%`);
+  const escape = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const tbody = rows.map((n) => {
+    const display = n.long_name || n.short_name || `!${n.num.toString(16).padStart(8, '0')}`;
+    return `<tr>
+      <td>${escape(display)}</td>
+      <td>${fmtAge(n.last_heard)}</td>
+      <td>${n.snr.toFixed(1)} dB</td>
+      <td>${fmtBat(n.battery_level)}</td>
+      <td class="id">!${n.num.toString(16).padStart(8, '0')}</td>
+    </tr>`;
+  }).join('');
+  listEl.innerHTML = `<table>
+    <thead><tr><th>Node</th><th>Last heard</th><th>SNR</th><th>Battery</th><th>ID</th></tr></thead>
+    <tbody>${tbody}</tbody>
+  </table>`;
 }
 
 /// Render the currently-selected thread into the messages pane.
@@ -134,6 +211,21 @@ export function renderChat() {
     } else {
       const body = document.createElement('span'); body.className = 'body'; body.textContent = m.body;
       row.appendChild(body);
+    }
+    if (m.status) {
+      const status = document.createElement('span');
+      status.className = 'msg-status';
+      const map = {
+        pending:   { icon: '⏳', hover: 'Waiting for delivery ack' },
+        delivered: { icon: '✓',  hover: 'Delivered' },
+        failed:    { icon: '❌', hover: 'Delivery failed' },
+        timed_out: { icon: '⏱', hover: 'No ack within timeout; may still be in flight' },
+        cancelled: { icon: '⊘', hover: 'Cancelled' },
+      };
+      const view = map[m.status] || { icon: '?', hover: m.status };
+      status.textContent = view.icon;
+      status.title = view.hover;
+      row.appendChild(status);
     }
     chatEl.appendChild(row);
   }

@@ -13,7 +13,7 @@
 
 import { state } from './state.js';
 import { log, nodeAddr, setStatus, updateInfoCard } from './ui.js';
-import { ensureThread, routeIncoming } from './chat.js';
+import { ensureThread, routeIncoming, setMessageStatus, renderNodes } from './chat.js';
 
 // ---------- callbacks owned by app.js ----------
 //
@@ -81,11 +81,13 @@ export function handleEvent(ev) {
       state.knownNodes.set(hex, name);
       if (hex !== state.myNodeHex) ensureThread(`node:${hex}`, `DM — ${name} (${hex})`);
       updateInfoCard();
+      renderNodes();
       break;
     }
     case 'config_complete': {
       setStatus('Ready', 'ready');
       hooks.onConfigComplete?.();
+      renderNodes();
       break;
     }
     case 'incoming_text': {
@@ -99,6 +101,13 @@ export function handleEvent(ev) {
     case 'owner':
       fireApplyConfirm('owner');
       break;
+    case 'ack_or_nak': {
+      // wasm side emits status as 'delivered' / 'failed' / 'timed_out' /
+      // 'cancelled' (events.rs::AckOrNak). Pass straight through to the
+      // chat module's message-status map.
+      setMessageStatus(ev.request_id, ev.status);
+      break;
+    }
     // 'log', 'queue_status', 'incoming_data' — log only.
     default:
       break;

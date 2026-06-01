@@ -139,6 +139,22 @@ pub(crate) struct FixedPositionDto {
     pub altitude: i32,
 }
 
+/// Flattened view of one peer's `NodeInfo` for the JS-side node list.
+/// Only the fields the UI actually shows are carried; if a richer panel
+/// is needed later (uptime, voltage, …) extend the struct.
+#[derive(Serialize, Default)]
+pub(crate) struct NodeDto {
+    pub num: u32,
+    pub long_name: String,
+    pub short_name: String,
+    pub snr: f32,
+    pub last_heard: u32,
+    /// 0..100 battery percent, or `101` for AC-powered. `None` if the
+    /// node hasn't reported device metrics yet.
+    pub battery_level: Option<u32>,
+    pub channel: u32,
+}
+
 // ---------- builders: ProtocolState -> Snapshot ----------
 
 pub(crate) fn build_snapshot(state: &ProtocolState) -> Snapshot {
@@ -547,6 +563,36 @@ impl WebClient {
     pub fn snapshot(&self) -> Result<JsValue, JsValue> {
         let snap = build_snapshot(&self.inner.state.borrow());
         serde_wasm_bindgen::to_value(&snap).map_err(|e| err(&format!("snapshot: {e}")))
+    }
+
+    /// Snapshot of every peer the radio currently knows about (its
+    /// `NodeDB` minus our own entry). Returned as a JS array of
+    /// [`NodeDto`]s sorted by `last_heard` descending so the most
+    /// recently active peers are at the top. JS renders the list in
+    /// the Chat tab's collapsible Nodes panel.
+    #[wasm_bindgen(js_name = listNodes)]
+    pub fn list_nodes(&self) -> Result<JsValue, JsValue> {
+        let state = self.inner.state.borrow();
+        let my = state.my_info.as_ref().map(|i| i.my_node_num);
+        let mut out: Vec<NodeDto> = state
+            .nodes
+            .values()
+            .filter(|n| Some(n.num) != my)
+            .map(|n| {
+                let user = n.user.as_ref();
+                NodeDto {
+                    num: n.num,
+                    long_name: user.map(|u| u.long_name.clone()).unwrap_or_default(),
+                    short_name: user.map(|u| u.short_name.clone()).unwrap_or_default(),
+                    snr: n.snr,
+                    last_heard: n.last_heard,
+                    battery_level: n.device_metrics.as_ref().and_then(|m| m.battery_level),
+                    channel: n.channel,
+                }
+            })
+            .collect();
+        out.sort_by_key(|n| std::cmp::Reverse(n.last_heard));
+        serde_wasm_bindgen::to_value(&out).map_err(|e| err(&format!("list_nodes: {e}")))
     }
 
     /// One-shot fixed-position write — no state overlay because the device
