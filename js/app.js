@@ -48,6 +48,39 @@ window.addEventListener('hashchange', () => {
   if (location.hash.startsWith('#/settings')) renderSettings();
 });
 
+// ---------- appearance / theme picker ----------
+//
+// Theme preference lives in localStorage as `voicetastic-theme` ∈
+// {system, dark, light}. `system` follows the OS via prefers-color-scheme.
+// Anything else pins the `data-theme` attribute on <html>. Settings page
+// has the picker; here we apply the saved preference at startup and
+// listen for OS theme changes when in `system` mode.
+
+const themePicker = document.getElementById('theme-picker');
+const themeMql = window.matchMedia('(prefers-color-scheme: light)');
+
+function applyTheme(pref) {
+  const root = document.documentElement;
+  const resolved = pref === 'system' ? (themeMql.matches ? 'light' : 'dark') : pref;
+  if (resolved === 'dark') root.removeAttribute('data-theme');
+  else root.setAttribute('data-theme', resolved);
+}
+
+const savedTheme = localStorage.getItem('voicetastic-theme') || 'system';
+if (themePicker) themePicker.value = savedTheme;
+applyTheme(savedTheme);
+
+themePicker?.addEventListener('change', () => {
+  const pref = themePicker.value;
+  localStorage.setItem('voicetastic-theme', pref);
+  applyTheme(pref);
+});
+
+themeMql.addEventListener('change', () => {
+  const pref = localStorage.getItem('voicetastic-theme') || 'system';
+  if (pref === 'system') applyTheme('system');
+});
+
 // ---------- mobile nav hamburger ----------
 
 const navToggle = document.querySelector('.nav-toggle');

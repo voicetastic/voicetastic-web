@@ -118,6 +118,22 @@
           <span id="settings-hint" class="muted">Connect a radio to load settings.</span>
         </div>
 
+        <h2 class="category">Appearance</h2>
+        <details class="setcard" open>
+          <summary>
+            <h3>🎨 Appearance</h3>
+            <span class="hint">client-side theme (saved per browser)</span>
+          </summary>
+          <div class="fields">
+            <label for="theme-picker">Theme</label>
+            <select id="theme-picker">
+              <option value="system" selected>System (follow OS)</option>
+              <option value="dark">Dark</option>
+              <option value="light">Light</option>
+            </select>
+          </div>
+        </details>
+
         <h2 class="category">Meshtastic</h2>
         <div id="settings-cards"></div>
 
@@ -191,6 +207,16 @@
               <option value="conservative">Conservative — long quiet windows, slow round growth</option>
               <option value="aggressive">Aggressive — short windows, many rounds</option>
             </select>
+
+            <label for="partial-play">Play partial voice on timeout</label>
+            <div>
+              <input id="partial-play" type="checkbox" checked disabled />
+              <span class="muted" style="font-size:0.8rem;">
+                If the reassembly timer fires before all chunks arrive, play
+                what was received (missing data is filled with silence)
+                instead of dropping the message.
+              </span>
+            </div>
             <div class="muted" style="font-size:0.8rem;">
               Broadcast traffic is always treated as <code>Off</code> regardless
               — the assembler short-circuits broadcast NACK emission.
@@ -200,6 +226,25 @@
             <div class="muted" style="font-size:0.85rem;">
               ✓ Codec2 &nbsp;·&nbsp; ✓ Opus (libopus → emscripten standalone wasm)
               &nbsp;·&nbsp; ✓ AMR-NB (opencore-amr → emscripten standalone wasm)
+            </div>
+          </div>
+        </details>
+
+        <h2 class="category">Device actions</h2>
+        <details class="setcard">
+          <summary>
+            <h3>⚠ Device actions</h3>
+            <span class="hint">reboot, reset NodeDB, factory reset</span>
+          </summary>
+          <div class="fields" style="grid-template-columns: 1fr;">
+            <button id="action-reboot" disabled>Reboot device (5s)</button>
+            <button id="action-reset-nodedb" disabled>Reset NodeDB (then refresh)</button>
+            <button id="action-factory-reset" class="danger" disabled>Factory reset</button>
+            <div class="muted" style="font-size:0.8rem;">
+              Sent as admin messages to the connected radio. Factory reset wipes
+              owner, channels, and module configs; Reset NodeDB only clears
+              learned peer entries and re-pulls the config burst so the local
+              snapshot reflects the wipe.
             </div>
           </div>
         </details>

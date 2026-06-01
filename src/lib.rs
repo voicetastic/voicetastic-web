@@ -94,6 +94,18 @@ pub(crate) struct Inner {
     /// 3 = Medium, 4 = Heavy. Mapped to [`VoiceFecMode`] per-message in
     /// `Inner::send_voice` via [`voice::fec_mode_from_u8`].
     pub(crate) fec_mode: Cell<u8>,
+    /// Wall-clock of the most recent successfully-decoded inbound frame.
+    /// Updated by `read_loop`; consulted by `nack_tick_loop` to drive the
+    /// idle-probe. Mirrors the desktop service's silent-probe path: when
+    /// a radio's RF state machine parks (e.g. after a long string of
+    /// MaxRetransmit failures) the host write path is still alive so we
+    /// can poke it with a `WantConfigId`. Seeded at connect with
+    /// `Instant::now()` so the first probe waits the full quiet window.
+    pub(crate) last_inbound_at: Cell<web_time::Instant>,
+    /// Consecutive silent probes sent without any inbound reply since.
+    /// Cleared each time `last_inbound_at` advances. Surfaced as a log
+    /// line at the second consecutive probe so a stuck radio is visible.
+    pub(crate) silent_probes: Cell<u32>,
 }
 
 impl Inner {
@@ -223,6 +235,52 @@ impl WebClient {
         })
     }
 
+    /// Reboot the connected radio after `secs` seconds. Wraps
+    /// `AdminMessage::RebootSeconds` (mirrors core's `reboot()`).
+    #[wasm_bindgen(js_name = reboot)]
+    pub fn reboot(&self, secs: i32) -> js_sys::Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            use voicetastic_core::proto::admin_message::PayloadVariant;
+            inner.send_admin(PayloadVariant::RebootSeconds(secs)).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// Factory-reset the connected radio's config (mirrors core's
+    /// `factory_reset()`). Wipes owner, channels, and module configs.
+    #[wasm_bindgen(js_name = factoryReset)]
+    pub fn factory_reset(&self) -> js_sys::Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            use voicetastic_core::proto::admin_message::PayloadVariant;
+            inner.send_admin(PayloadVariant::FactoryResetConfig(1)).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// Wipe the connected radio's NodeDB (every learned NodeInfo), drop
+    /// our cached peer map in lockstep, and re-request the config burst so
+    /// the local snapshot reflects the wipe. Mirrors core's
+    /// `MeshtasticService::reset_nodedb_and_refresh`. The firmware never
+    /// re-bursts NodeInfo for an empty NodeDB, so clearing the local cache
+    /// here is what actually makes the UI forget the stale peers; JS-side
+    /// mirrors (`state.knownNodes`) still need to be cleared by the caller.
+    #[wasm_bindgen(js_name = resetNodedb)]
+    pub fn reset_nodedb(&self) -> js_sys::Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            use voicetastic_core::proto::admin_message::PayloadVariant;
+            inner.send_admin(PayloadVariant::NodedbReset(true)).await?;
+            // `ProtocolState.nodes` is a public field; clearing it inline
+            // works regardless of the pinned core revision. Switch to
+            // `clear_nodes()` once the git dep is bumped past the helper.
+            inner.state.borrow_mut().nodes.clear();
+            inner.write_payload(protocol::want_config(rand_u32())).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
     /// Graceful teardown: cancel the inbound stream, close the writer, and
     /// close the port. Consumes the `WebClient` — wasm-bindgen marks the JS
     /// proxy as freed, so any subsequent method call from JS will throw.
@@ -291,6 +349,8 @@ pub async fn connect(
         amrnb_mode: Cell::new(5), // MR795 — same default as desktop GUI
         opus_kbps: Cell::new(12), // 12 kbps — same default as desktop GUI
         fec_mode: Cell::new(0), // 0 = Auto — recommended default
+        last_inbound_at: Cell::new(web_time::Instant::now()),
+        silent_probes: Cell::new(0),
     });
 
     // Background inbound loop: read → deframe → core decode → core state/voice.
@@ -360,6 +420,13 @@ async fn read_loop(
             if payload.is_empty() {
                 continue; // resync marker
             }
+            // Any well-formed frame (snapshot, voice, data, queue status,
+            // routing ack) is proof the radio's host pipe is still alive.
+            // Reset the silence timer here so the idle-probe in
+            // `nack_tick_loop` only fires when the radio actually goes
+            // quiet, not just when there's no voice traffic.
+            inner.last_inbound_at.set(web_time::Instant::now());
+            inner.silent_probes.set(0);
             // Hold the immutable borrow for the duration of decode — the
             // ctx carries `&state.nodes`. Drop it before the apply loop
             // below mutably borrows. `our_private_key` is intentionally

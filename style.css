@@ -20,6 +20,28 @@
   font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue',
     Arial, 'Noto Sans', sans-serif;
 }
+
+/* Light theme override. Activated by setting `data-theme="light"` on
+   <html>; settings.js does this in response to the Appearance picker. */
+html[data-theme="light"] {
+  --bg: #fbf6f3;
+  --bg-elevated: #f3ece8;
+  --bg-card: #ffffff;
+  --bg-card-high: #f6efeb;
+  --border: #e5d9d2;
+  --border-strong: #5e5450;
+  --text: #1c1715;
+  --text-muted: #5e5450;
+  --accent: #8a3a1e;
+  --accent-strong: #5b2412;
+  --accent-on: #ffffff;
+  --danger: #b3261e;
+  --ok: #2f7a3a;
+  --warn: #8a5a0a;
+}
+html[data-theme="light"] .site-header {
+  background: rgba(251, 246, 243, 0.85);
+}
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); line-height: 1.6; }
 a { color: var(--accent); text-decoration: none; }
@@ -147,6 +169,11 @@ button.ghost {
   border: 1px solid var(--border);
 }
 button.ghost:hover { border-color: var(--accent); }
+button.danger {
+  background: var(--bg-card); color: var(--danger);
+  border: 1px solid rgba(255, 222, 219, 0.4);
+}
+button.danger:hover { border-color: var(--danger); }
 
 select, input[type='text'] {
   font-size: 1rem; padding: 0.55rem 0.7rem;

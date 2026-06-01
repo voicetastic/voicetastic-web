@@ -7,8 +7,9 @@
 // wires its change handlers to the wasm setters.
 
 import { state } from './state.js';
-import { log } from './ui.js';
+import { log, updateInfoCard } from './ui.js';
 import { waitForApplyConfirm } from './events.js';
+import { renderChat } from './chat.js';
 
 // ---------- enum tables ----------
 //
@@ -400,7 +401,8 @@ function renderOneChannel(ch) {
 
 let settingsCardsEl, settingsRefreshBtn, settingsHintEl;
 let denoiseEl, sendCodecEl, codecModeEl, amrnbModeEl, opusKbpsEl;
-let fecModeEl, nackModeEl;
+let fecModeEl, nackModeEl, partialPlayEl;
+let actionRebootBtn, actionResetNodedbBtn, actionFactoryResetBtn;
 
 /// Wire up DOM refs + Audio category change handlers. Called once at
 /// startup by app.js.
@@ -420,6 +422,7 @@ export function initSettings() {
   opusKbpsEl = document.getElementById('opus-kbps');
   fecModeEl = document.getElementById('fec-mode');
   nackModeEl = document.getElementById('nack-mode');
+  partialPlayEl = document.getElementById('partial-play');
 
   denoiseEl.onchange = () => {
     if (!state.client) return;
@@ -460,6 +463,59 @@ export function initSettings() {
     state.client.setNackMode(nackModeEl.value);
     log(`NACK policy set to ${nackModeEl.options[nackModeEl.selectedIndex].text}`);
   };
+  partialPlayEl.onchange = () => {
+    if (!state.client) return;
+    state.client.setPartialPlayOnTimeout(partialPlayEl.checked);
+    log(`partial play on timeout ${partialPlayEl.checked ? 'on' : 'off'}`);
+  };
+
+  actionRebootBtn = document.getElementById('action-reboot');
+  actionResetNodedbBtn = document.getElementById('action-reset-nodedb');
+  actionFactoryResetBtn = document.getElementById('action-factory-reset');
+
+  actionRebootBtn.onclick = () => runDeviceAction(
+    actionRebootBtn,
+    'Reboot',
+    () => state.client.reboot(5),
+    'Reboot in 5s? The radio will go offline briefly.',
+  );
+  actionResetNodedbBtn.onclick = () => runDeviceAction(
+    actionResetNodedbBtn,
+    'Reset NodeDB',
+    async () => {
+      await state.client.resetNodedb();
+      // Wasm cleared its ProtocolState.nodes; mirror in JS so the chat
+      // thread list + info card don't keep showing wiped peers.
+      state.knownNodes.clear();
+      updateInfoCard();
+      renderChat();
+    },
+    'Wipe the radio’s NodeDB (all learned peers) and re-pull config?',
+  );
+  actionFactoryResetBtn.onclick = () => runDeviceAction(
+    actionFactoryResetBtn,
+    'Factory reset',
+    () => state.client.factoryReset(),
+    'Factory-reset the radio? Owner, channels, and module configs will be wiped.',
+  );
+}
+
+async function runDeviceAction(btn, label, fn, confirmMsg) {
+  if (!state.client) return;
+  if (!window.confirm(confirmMsg)) return;
+  const prev = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = `${label}…`;
+  try {
+    await fn();
+    log(`${label} command sent`);
+    btn.textContent = `${label} ✓`;
+  } catch (e) {
+    log(`${label} failed: ${e}`);
+    btn.textContent = `${label} ✗`;
+  } finally {
+    setTimeout(() => { btn.textContent = prev; btn.disabled = !state.client; }, 1800);
+  }
 }
 
 /// Show only the mode/bitrate dropdown for the currently-selected send
@@ -481,7 +537,11 @@ export function setAudioControlsEnabled(on) {
   opusKbpsEl.disabled = !on;
   fecModeEl.disabled = !on;
   nackModeEl.disabled = !on;
+  partialPlayEl.disabled = !on;
   settingsRefreshBtn.disabled = !on;
+  actionRebootBtn.disabled = !on;
+  actionResetNodedbBtn.disabled = !on;
+  actionFactoryResetBtn.disabled = !on;
   if (on) refreshCodecRows();
 }
 
