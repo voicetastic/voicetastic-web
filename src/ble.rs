@@ -107,11 +107,23 @@ pub async fn open() -> Result<BleHandles, JsValue> {
     )
     .await?
     .dyn_into()?;
+    // `fromNum` increments each time `fromRadio` has new data; subscribing
+    // to its `characteristicvaluechanged` event lets the driver run on
+    // notifications instead of polling. The characteristic itself is
+    // optional on older firmware — keep the connect path going either way
+    // and the caller can detect `from_num.is_none()` to fall back to polling.
+    let from_num: Option<web_sys::BluetoothRemoteGattCharacteristic> = JsFuture::from(
+        service.get_characteristic_with_str(FROM_NUM_CHARACTERISTIC),
+    )
+    .await
+    .ok()
+    .and_then(|v| v.dyn_into().ok());
 
     Ok(BleHandles {
         device,
         from_radio,
         to_radio,
+        from_num,
     })
 }
 
@@ -123,6 +135,11 @@ pub struct BleHandles {
     pub device: web_sys::BluetoothDevice,
     pub from_radio: web_sys::BluetoothRemoteGattCharacteristic,
     pub to_radio: web_sys::BluetoothRemoteGattCharacteristic,
+    /// `fromNum` notify characteristic — present on every Meshtastic
+    /// firmware that knows about Web Bluetooth, but optional in this
+    /// API in case some hand-rolled firmware lacks it. When `None` the
+    /// driver falls back to polling `fromRadio`.
+    pub from_num: Option<web_sys::BluetoothRemoteGattCharacteristic>,
 }
 
 /// Read one `FromRadio` chunk via the GATT `fromRadio` characteristic.

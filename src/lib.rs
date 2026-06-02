@@ -71,10 +71,29 @@ pub(crate) enum InnerTransport {
         device: web_sys::BluetoothDevice,
         from_radio: web_sys::BluetoothRemoteGattCharacteristic,
         to_radio: web_sys::BluetoothRemoteGattCharacteristic,
-        /// Set to `true` by `disconnect()` so the polling read loop
-        /// exits on the next tick instead of looping forever after
-        /// the GATT link drops.
+        /// `fromNum` notification characteristic. Driving the read
+        /// loop from its `characteristicvaluechanged` event saves the
+        /// 250 ms polling tick and the firmware's BLE controller a
+        /// pile of empty reads. `None` if the firmware doesn't expose
+        /// it (falls back to polling).
+        from_num: Option<web_sys::BluetoothRemoteGattCharacteristic>,
+        /// Set to `true` by `disconnect()` so any in-flight drain or
+        /// fallback poll loop bails on its next iteration instead of
+        /// running against a dead characteristic.
         stopped: std::cell::Cell<bool>,
+        /// Re-entrancy guard for the notification-driven drain.
+        /// `fromNum` can fire while a drain is still in flight; the
+        /// in-flight drain reads `fromRadio` until empty so any
+        /// fresh data will land in that loop. The new notification
+        /// just sets a "re-poll when done" flag.
+        drain_active: std::cell::Cell<bool>,
+        drain_pending: std::cell::Cell<bool>,
+        /// Held to keep the disconnect-event handler alive; dropped
+        /// in `disconnect()` when the whole transport is taken down.
+        _disconnect_listener: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)>,
+        /// Held to keep the `fromNum` notification handler alive.
+        /// `None` when the firmware lacks `fromNum`.
+        _notify_listener: Option<wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)>>,
     },
 }
 
@@ -128,6 +147,13 @@ pub(crate) struct Inner {
     /// can poke it with a `WantConfigId`. Seeded at connect with
     /// `Instant::now()` so the first probe waits the full quiet window.
     pub(crate) last_inbound_at: Cell<web_time::Instant>,
+    /// Cached JS event sinks supplied by the JS-side `connect()` /
+    /// `connectBle()` caller. The BLE notification handler needs to
+    /// emit through these without re-threading them through every
+    /// helper. `None` only before the first connect — populated for
+    /// the lifetime of `Inner`.
+    pub(crate) on_event: RefCell<Option<js_sys::Function>>,
+    pub(crate) on_voice: RefCell<Option<js_sys::Function>>,
     /// Consecutive silent probes sent without any inbound reply since.
     /// Cleared each time `last_inbound_at` advances. Surfaced as a log
     /// line at the second consecutive probe so a stuck radio is visible.
@@ -332,6 +358,45 @@ impl WebClient {
     ///
     /// Each step's error is swallowed: a half-broken connection still needs
     /// to make as much progress towards closure as possible.
+    /// Revoke the page's permission to talk to the currently-connected
+    /// BLE device — equivalent to "forget this device" in Chromium's
+    /// per-site Bluetooth settings. Closes the GATT link first and
+    /// then drops the persisted permission so a subsequent
+    /// `connect_ble()` shows the device picker again instead of
+    /// auto-resuming. No-op on the Serial transport.
+    ///
+    /// Note: this does NOT unpair the device at the OS level — Web
+    /// Bluetooth deliberately can't reach BlueZ's bond database. Use
+    /// the system Bluetooth settings (or `bluetoothctl remove`) for
+    /// full unpairing.
+    #[wasm_bindgen(js_name = forget)]
+    pub fn forget(self) -> js_sys::Promise {
+        future_to_promise(async move {
+            if let InnerTransport::Ble { device, stopped, .. } = &self.inner.transport {
+                stopped.set(true);
+                if let Some(gatt) = device.gatt() {
+                    gatt.disconnect();
+                }
+                // `BluetoothDevice.forget()` isn't bound in web-sys 0.3
+                // yet, so reach it via Reflect. Available in Chromium
+                // 116+; older browsers silently no-op (the .get returns
+                // undefined which dyn_into fails on).
+                if let Ok(method) =
+                    js_sys::Reflect::get(device, &JsValue::from_str("forget"))
+                    && let Ok(method) = method.dyn_into::<js_sys::Function>()
+                    && let Ok(promise) = method.call0(device.as_ref())
+                    && let Ok(promise) = promise.dyn_into::<js_sys::Promise>()
+                {
+                    let _ = JsFuture::from(promise).await;
+                    log("ble: device permission forgotten");
+                } else {
+                    log("ble: device.forget() unavailable (Chromium 116+ required)");
+                }
+            }
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
     #[wasm_bindgen(js_name = disconnect)]
     pub fn disconnect(self) -> js_sys::Promise {
         future_to_promise(async move {
@@ -341,12 +406,35 @@ impl WebClient {
                     let _ = JsFuture::from(writer.close()).await;
                     let _ = JsFuture::from(port.close()).await;
                 }
-                InnerTransport::Ble { device, stopped, .. } => {
-                    // Flip the stop flag so the polling read loop
-                    // exits on its next tick instead of looping
-                    // against a dead characteristic.
+                InnerTransport::Ble {
+                    device,
+                    from_num,
+                    stopped,
+                    _notify_listener,
+                    _disconnect_listener,
+                    ..
+                } => {
+                    // Flip the stop flag so any in-flight drain bails
+                    // and the fallback polling loop exits.
                     stopped.set(true);
-                    // GATT disconnect handle drops the connection.
+                    // Stop the BLE notify subscription before tearing
+                    // down the listener. Best-effort: a failed
+                    // `stopNotifications` doesn't block disconnect.
+                    if let Some(fr) = from_num.as_ref() {
+                        let _ = JsFuture::from(fr.stop_notifications()).await;
+                        let _ = fr.remove_event_listener_with_callback(
+                            "characteristicvaluechanged",
+                            _notify_listener
+                                .as_ref()
+                                .map(|c| c.as_ref().unchecked_ref())
+                                .unwrap_or(&js_sys::Function::new_no_args("")),
+                        );
+                    }
+                    let _ = device.remove_event_listener_with_callback(
+                        "gattserverdisconnected",
+                        _disconnect_listener.as_ref().unchecked_ref(),
+                    );
+                    // GATT disconnect drops the link itself.
                     if let Some(gatt) = device.gatt() {
                         gatt.disconnect();
                     }
@@ -401,6 +489,8 @@ pub async fn connect(
         opus_kbps: Cell::new(12), // 12 kbps — same default as desktop GUI
         fec_mode: Cell::new(0), // 0 = Auto — recommended default
         last_inbound_at: Cell::new(web_time::Instant::now()),
+        on_event: RefCell::new(Some(on_event.clone())),
+        on_voice: RefCell::new(Some(on_voice.clone())),
         silent_probes: Cell::new(0),
     });
 
@@ -461,34 +551,120 @@ pub async fn connect_ble(
         handles.device.id(),
     ));
 
-    let inner = Rc::new(Inner {
-        transport: InnerTransport::Ble {
-            device: handles.device,
-            from_radio: handles.from_radio,
-            to_radio: handles.to_radio,
-            stopped: std::cell::Cell::new(false),
-        },
-        state: RefCell::new(ProtocolState::default()),
-        next_id: Cell::new(rand_u32()),
-        assembler: VoiceAssembler::new(AssemblerConfig::default()),
-        registry: OutgoingVoiceRegistry::default(),
-        queue_free: Cell::new(u32::MAX),
-        denoise_enabled: Cell::new(true),
-        codec_param: Cell::new(DEFAULT_CODEC2_MODE),
-        send_codec: Cell::new(0),
-        amrnb_mode: Cell::new(5),
-        opus_kbps: Cell::new(12),
-        fec_mode: Cell::new(0),
-        last_inbound_at: Cell::new(web_time::Instant::now()),
-        silent_probes: Cell::new(0),
-    });
+    // Build Inner first so the closures below can capture a Weak<Inner>
+    // (the GATT-disconnect + fromNum notification listeners need to call
+    // back into Inner). `Rc::new_cyclic` lets us hand the closures a
+    // `Weak<Inner>` before `Inner` is fully constructed — they upgrade
+    // it on each fire and no-op if Inner has already been dropped.
+    let inner = Rc::new_cyclic(|weak_inner: &std::rc::Weak<Inner>| {
+        // gattserverdisconnected — fires when the BLE link drops for
+        // any reason (radio powered off, out of range, OS unpair, …).
+        // Surface a log line + flip the stop cell so any in-flight
+        // drain bails on its next iteration.
+        let weak_d = weak_inner.clone();
+        let disconnect_listener = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::Event)>::new(
+            move |_ev: web_sys::Event| {
+                if let Some(inner) = weak_d.upgrade()
+                    && let InnerTransport::Ble { stopped, .. } = &inner.transport
+                {
+                    stopped.set(true);
+                    log("ble: gattserverdisconnected — radio link dropped");
+                }
+            },
+        );
 
-    let rx = inner.clone();
-    wasm_bindgen_futures::spawn_local(async move {
-        if let Err(e) = ble_read_loop(rx, on_event, on_voice).await {
-            log(&format!("ble read loop ended: {e:?}"));
+        // characteristicvaluechanged on `fromNum` — fires each time the
+        // firmware has new `fromRadio` data. `weak_n.upgrade()` is the
+        // standard pattern for closures that outlive their owner.
+        // Only registered when `from_num` is present.
+        let notify_listener = handles.from_num.as_ref().map(|_| {
+            let weak_n = weak_inner.clone();
+            wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::Event)>::new(
+                move |_ev: web_sys::Event| {
+                    if let Some(inner) = weak_n.upgrade() {
+                        schedule_ble_drain(&inner);
+                    }
+                },
+            )
+        });
+
+        Inner {
+            transport: InnerTransport::Ble {
+                device: handles.device,
+                from_radio: handles.from_radio,
+                to_radio: handles.to_radio,
+                from_num: handles.from_num,
+                stopped: std::cell::Cell::new(false),
+                drain_active: std::cell::Cell::new(false),
+                drain_pending: std::cell::Cell::new(false),
+                _disconnect_listener: disconnect_listener,
+                _notify_listener: notify_listener,
+            },
+            state: RefCell::new(ProtocolState::default()),
+            next_id: Cell::new(rand_u32()),
+            assembler: VoiceAssembler::new(AssemblerConfig::default()),
+            registry: OutgoingVoiceRegistry::default(),
+            queue_free: Cell::new(u32::MAX),
+            denoise_enabled: Cell::new(true),
+            codec_param: Cell::new(DEFAULT_CODEC2_MODE),
+            send_codec: Cell::new(0),
+            amrnb_mode: Cell::new(5),
+            opus_kbps: Cell::new(12),
+            fec_mode: Cell::new(0),
+            last_inbound_at: Cell::new(web_time::Instant::now()),
+            on_event: RefCell::new(Some(on_event.clone())),
+            on_voice: RefCell::new(Some(on_voice.clone())),
+            silent_probes: Cell::new(0),
         }
     });
+
+    // Register the listeners now that the closures live inside Inner
+    // (they're held there to keep them alive for the connection's
+    // lifetime). `start_notifications()` on `fromNum` arms the BLE
+    // notify subscription.
+    if let InnerTransport::Ble {
+        device,
+        from_num,
+        _disconnect_listener,
+        _notify_listener,
+        ..
+    } = &inner.transport
+    {
+        device.add_event_listener_with_callback(
+            "gattserverdisconnected",
+            _disconnect_listener.as_ref().unchecked_ref(),
+        )?;
+        if let (Some(from_num), Some(listener)) = (from_num.as_ref(), _notify_listener.as_ref()) {
+            from_num.add_event_listener_with_callback(
+                "characteristicvaluechanged",
+                listener.as_ref().unchecked_ref(),
+            )?;
+            JsFuture::from(from_num.start_notifications()).await?;
+        }
+    }
+
+    // Pick the right read driver. With `fromNum` notifications armed we
+    // rely entirely on the event listener + drain; the polling fallback
+    // covers firmware that doesn't expose `fromNum`. Either way an
+    // initial drain catches any data already queued before the listener
+    // was attached.
+    let drain_init = inner.clone();
+    wasm_bindgen_futures::spawn_local(async move {
+        schedule_ble_drain(&drain_init);
+    });
+    if matches!(
+        &inner.transport,
+        InnerTransport::Ble { from_num: None, .. }
+    ) {
+        let poll_rx = inner.clone();
+        let poll_event = on_event.clone();
+        let poll_voice = on_voice.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Err(e) = ble_read_loop(poll_rx, poll_event, poll_voice).await {
+                log(&format!("ble polling read loop ended: {e:?}"));
+            }
+        });
+    }
     let nack_inner = inner.clone();
     wasm_bindgen_futures::spawn_local(async move {
         nack_tick_loop(nack_inner).await;
@@ -510,6 +686,90 @@ pub async fn connect_ble(
     log(&format!("ble: sent WantConfigId nonce={nonce}"));
 
     Ok(WebClient { inner })
+}
+
+/// Drain `fromRadio` until the firmware reports empty, processing each
+/// frame through [`process_payload`]. Spawned on every `fromNum`
+/// notification (and once at connect time to catch anything queued
+/// before the listener attached).
+///
+/// `drain_active` / `drain_pending` form a tiny re-entrancy guard:
+/// a notification that arrives while a drain is in flight just sets
+/// `drain_pending`, and the in-flight loop re-checks after the radio
+/// reports empty. That way we never spawn two concurrent reads on the
+/// same characteristic (BLE GATT doesn't define concurrent reads).
+pub(crate) fn schedule_ble_drain(inner: &Rc<Inner>) {
+    let (active, pending) = match &inner.transport {
+        InnerTransport::Ble {
+            drain_active,
+            drain_pending,
+            stopped,
+            ..
+        } => {
+            if stopped.get() {
+                return;
+            }
+            if drain_active.get() {
+                drain_pending.set(true);
+                return;
+            }
+            drain_active.set(true);
+            (drain_active, drain_pending)
+        }
+        _ => return,
+    };
+    // We can't borrow `active` / `pending` across `await` (Cell is
+    // !Send and the borrow is to fields of Inner). Resolve the
+    // references inside the spawned task instead.
+    let _ = (active, pending);
+    let inner = inner.clone();
+    wasm_bindgen_futures::spawn_local(async move {
+        let on_event = inner.on_event.borrow().clone();
+        let on_voice = inner.on_voice.borrow().clone();
+        let (Some(on_event), Some(on_voice)) = (on_event, on_voice) else {
+            return;
+        };
+        // The `loop { match … }` body has three early-exit arms, none
+        // of which fit a `while let` shape cleanly; opt out of the
+        // lint locally rather than contort the control flow.
+        #[allow(clippy::while_let_loop)]
+        loop {
+            let from_radio = match &inner.transport {
+                InnerTransport::Ble {
+                    from_radio,
+                    stopped,
+                    ..
+                } => {
+                    if stopped.get() {
+                        break;
+                    }
+                    from_radio.clone()
+                }
+                _ => break,
+            };
+            match ble::read_from_radio(&from_radio).await {
+                Ok(Some(bytes)) => process_payload(&inner, &bytes, &on_event, &on_voice),
+                Ok(None) => break,
+                Err(e) => {
+                    log(&format!("ble drain: {e:?}"));
+                    break;
+                }
+            }
+        }
+        // Drain done. If a notification fired while we were running,
+        // honour it now by re-entering with a fresh drain.
+        if let InnerTransport::Ble {
+            drain_active,
+            drain_pending,
+            ..
+        } = &inner.transport
+        {
+            drain_active.set(false);
+            if drain_pending.replace(false) {
+                schedule_ble_drain(&inner);
+            }
+        }
+    });
 }
 
 /// Process one decoded `FromRadio` payload — common to both the

@@ -24,6 +24,7 @@ import { renderMap } from './map.js';
 const connectBtn = document.getElementById('connect');
 const connectBleBtn = document.getElementById('connect-ble');
 const disconnectBtn = document.getElementById('disconnect');
+const forgetBtn = document.getElementById('forget');
 const discoverBtn = document.getElementById('discover');
 const connectHint = document.getElementById('connect-hint');
 const infoCard = document.getElementById('info');
@@ -119,6 +120,11 @@ function setConnectedUi(on) {
   connectBleBtn.hidden = on;
   connectBleBtn.disabled = on;
   disconnectBtn.hidden = !on;
+  // Forget is only meaningful for BLE connections — it revokes the
+  // site's BLE permission for the active device. We only flip it
+  // visible while connected; the BLE-vs-Serial discriminant lives on
+  // `state.transport` (set by the connect handlers below).
+  forgetBtn.hidden = !on || state.transport !== 'ble';
 }
 
 function hasWebBluetooth() {
@@ -170,9 +176,11 @@ const hasBle = hasWebBluetooth();
   log('WASM loaded. Ready to connect.');
 
   /// Shared post-connect bookkeeping for both Serial and BLE paths.
-  /// Mirrors the previous inline body of the Serial onclick handler.
-  const onClientConnected = (client) => {
+  /// `transport` records which path was used so the Forget button
+  /// (BLE-only) can be shown selectively.
+  const onClientConnected = (client, transport) => {
     state.client = client;
+    state.transport = transport;
     log('Connected. Config handshake in flight…');
     setStatus('Connected', 'connecting');
     connectHint.textContent = 'Connected — waiting for ConfigComplete…';
@@ -187,7 +195,7 @@ const hasBle = hasWebBluetooth();
     connectHint.textContent = 'Pick a serial port in the browser prompt…';
     log('Requesting port…');
     try {
-      onClientConnected(await connect(handleEvent, onVoice));
+      onClientConnected(await connect(handleEvent, onVoice), 'serial');
     } catch (e) {
       log('❌ ' + e);
       setStatus('Disconnected');
@@ -204,7 +212,7 @@ const hasBle = hasWebBluetooth();
     connectHint.textContent = 'Pick a Meshtastic device in the Bluetooth prompt…';
     log('Requesting BLE device…');
     try {
-      onClientConnected(await connectBle(handleEvent, onVoice));
+      onClientConnected(await connectBle(handleEvent, onVoice), 'ble');
     } catch (e) {
       log('❌ ' + e);
       setStatus('Disconnected');
@@ -214,32 +222,37 @@ const hasBle = hasWebBluetooth();
     }
   };
 
-  disconnectBtn.onclick = async () => {
+  /// Shared teardown for `disconnect()` and `forget()` — both consume
+  /// the WebClient on the Rust side, so the JS-side state must be
+  /// cleared before the await to avoid a freed-proxy call in flight.
+  const teardownClient = async (action, label) => {
     if (!state.client) return;
-    // Tear down the JS-side state up front, before the awaited
-    // disconnect — `disconnect()` consumes the WebClient on the Rust
-    // side, so any sendText/sendVoice that lands between the await
-    // resolving and the UI-gate update would hit a freed proxy.
     const client = state.client;
     state.client = null;
     disconnectBtn.disabled = true;
+    forgetBtn.disabled = true;
     setConnectedUi(false);
-    log('Disconnecting…');
+    log(`${label}…`);
     try {
-      await client.disconnect();
-      log('Disconnected.');
+      await action(client);
+      log(`${label} done.`);
     } catch (e) {
-      log('disconnect: ' + e);
+      log(`${label}: ${e}`);
     }
     disconnectBtn.disabled = false;
+    forgetBtn.disabled = false;
     setStatus('Disconnected');
-    connectHint.textContent = 'Click Connect, then pick the serial port.';
+    connectHint.textContent = 'Click Connect, then pick the serial port or Bluetooth device.';
     resetDeviceState();
     infoCard.hidden = true;
     clearThreads();
     renderSettings();
     renderNodes();
   };
+
+  disconnectBtn.onclick = () => teardownClient((c) => c.disconnect(), 'Disconnecting');
+
+  forgetBtn.onclick = () => teardownClient((c) => c.forget(), 'Forgetting BLE device');
 
   discoverBtn.onclick = async () => {
     if (!state.client) return;

@@ -11,6 +11,13 @@ export const state = {
   /// `sendText`, `sendVoice`, `setFixedPosition`, etc.
   client: null,
 
+  /// Which transport the active `client` was opened with: `'serial'` or
+  /// `'ble'` while connected, `null` between sessions. Surfaces the
+  /// transport-specific UI bits (e.g. the BLE "Forget device" button)
+  /// without re-deriving it from `client` (which would need a wasm
+  /// round-trip).
+  transport: null,
+
   /// Identity + capability of the attached radio. Set by events.js as
   /// the corresponding `InboundEvent`s land; consumed by chat (DM
   /// routing) and the info card. Reset on disconnect via
@@ -60,6 +67,7 @@ export function resetDeviceState() {
   state.myNodeNum = null;
   state.myNodeHex = null;
   state.fwVersion = null;
+  state.transport = null;
   state.knownChannels.clear();
   state.knownNodes.clear();
 }
