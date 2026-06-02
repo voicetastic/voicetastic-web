@@ -5,6 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <link rel="stylesheet" href="./style.css" />
+    <!-- Leaflet for the /map page. CDN with SRI so a compromised CDN
+         can't ship arbitrary JS. The page works fine offline once the
+         browser has cached both files. -->
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin="anonymous" />
+    <script
+      defer
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin="anonymous"></script>
     <title>Voicetastic Web</title>
   </head>
   <body>
@@ -264,9 +277,14 @@
       <section id="page-map" class="page">
         <h1>Map</h1>
         <p class="lead">
-          Mesh map view — known nodes plotted by reported position. Placeholder for now.
+          Mesh map view — known nodes plotted by their last reported
+          position. Tiles from OpenStreetMap. Click a marker for the
+          node's name, last-heard, and battery.
         </p>
-        <div class="map-stub">Map view coming soon.</div>
+        <div id="map" class="map-canvas"></div>
+        <div id="map-hint" class="muted" style="margin-top:0.5rem;font-size:0.85rem;">
+          Connect a radio with peers reporting positions to see pins.
+        </div>
       </section>
 
       <!-- ================================= DEBUG ================================ -->

@@ -17,6 +17,7 @@ import { handleEvent, setEventHooks } from './events.js';
 import { initChat, onVoice, renderChat, clearThreads, setChatEnabled, renderNodes } from './chat.js';
 import { initSettings, renderSettings, setAudioControlsEnabled } from './settings.js';
 import { initDebug, renderDebug } from './debug.js';
+import { renderMap } from './map.js';
 
 // ---------- DOM refs owned by this module ----------
 
@@ -48,6 +49,10 @@ route();
 window.addEventListener('hashchange', () => {
   if (location.hash.startsWith('#/settings')) renderSettings();
   if (location.hash.startsWith('#/debug')) renderDebug();
+  // Leaflet needs a sized container; calling renderMap on the
+  // hashchange (rather than at startup) means the /map section is
+  // already display:block by the time the layer initialises.
+  if (location.hash.startsWith('#/map')) renderMap();
 });
 
 // ---------- appearance / theme picker ----------

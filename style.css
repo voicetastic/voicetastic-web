@@ -244,6 +244,18 @@ input[type='text']:focus, select:focus { outline: none; border-color: var(--acce
 .nodes-list dl.node-detail dd { margin: 0; }
 .nodes-list dl.node-detail svg.spark { vertical-align: middle; }
 
+.map-canvas {
+  height: 60vh; min-height: 24rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+/* Match Leaflet's popup chrome to the rest of the UI so it doesn't
+   look like a stray system widget. */
+.leaflet-popup-content-wrapper, .leaflet-popup-tip {
+  background: var(--bg-card); color: var(--text);
+}
+
 .debug-list {
   max-height: 60vh; overflow-y: auto;
   background: var(--bg-card); border: 1px solid var(--border);
