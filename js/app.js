@@ -117,10 +117,7 @@ function setConnectedUi(on) {
   connectBtn.hidden = on;
   connectBtn.disabled = on;
   connectBleBtn.hidden = on;
-  // BLE button stays enabled-and-shown unless connected (matching the
-  // serial button) — its disabled state is owned by the capability
-  // check below.
-  if (!on && hasWebBluetooth()) connectBleBtn.disabled = false;
+  connectBleBtn.disabled = on;
   disconnectBtn.hidden = !on;
 }
 
@@ -146,22 +143,28 @@ initDebug();
 
 // ---------- bootstrap ----------
 
-// Either transport is enough; only fully bail if neither is present.
+// We leave both buttons clickable even when the corresponding API
+// isn't visible to JS. The browser hides `navigator.serial` and
+// `navigator.bluetooth` entirely on insecure origins (HTTP that
+// isn't `localhost`), so a "greyed out" button looks like a bug
+// to the user when really the page just needs HTTPS. Letting the
+// click through and surfacing the underlying error ("Web Bluetooth
+// not available — use Chrome/Edge/Opera over localhost or HTTPS")
+// is more honest. The wasm side returns a clear message in both
+// the "wrong browser" and "wrong context" cases.
 const hasSerial = 'serial' in navigator;
 const hasBle = hasWebBluetooth();
-if (!hasSerial && !hasBle) {
-  log('Neither Web Serial nor Web Bluetooth is available in this browser.');
-  connectBtn.disabled = true;
-  connectBleBtn.disabled = true;
-  setStatus('Unsupported', 'error');
-} else {
+{
+  // Tooltips give the user a hint before they click; the click
+  // itself never silently fails because the wasm helper rejects
+  // with the same explanation.
   if (!hasSerial) {
-    connectBtn.disabled = true;
-    log('Web Serial unavailable; use the Bluetooth path.');
+    connectBtn.title =
+      'Web Serial needs a Chromium browser or Firefox 151+, served over HTTPS or localhost.';
   }
   if (!hasBle) {
-    connectBleBtn.disabled = true;
-    connectBleBtn.title = 'Web Bluetooth requires a Chromium-based browser (Chrome / Edge / Opera).';
+    connectBleBtn.title =
+      'Web Bluetooth needs a Chromium browser (Chrome / Edge / Opera), served over HTTPS or localhost.';
   }
   await init();
   log('WASM loaded. Ready to connect.');
@@ -188,8 +191,8 @@ if (!hasSerial && !hasBle) {
     } catch (e) {
       log('❌ ' + e);
       setStatus('Disconnected');
-      connectBtn.disabled = !hasSerial;
-      connectBleBtn.disabled = !hasBle;
+      connectBtn.disabled = false;
+      connectBleBtn.disabled = false;
       connectHint.textContent = 'Pick a transport above, then approve the device in the browser prompt.';
     }
   };
@@ -205,8 +208,8 @@ if (!hasSerial && !hasBle) {
     } catch (e) {
       log('❌ ' + e);
       setStatus('Disconnected');
-      connectBtn.disabled = !hasSerial;
-      connectBleBtn.disabled = !hasBle;
+      connectBtn.disabled = false;
+      connectBleBtn.disabled = false;
       connectHint.textContent = 'Pick a transport above, then approve the device in the browser prompt.';
     }
   };
