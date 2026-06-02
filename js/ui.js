@@ -66,6 +66,13 @@ export function updateInfoCard() {
       line2.append('Firmware ', codeEl(state.fwVersion));
       infoBody.append(line2);
     }
+    // Mirror the firmware version on the Settings → Firmware
+    // update card so the user can compare against a downloaded
+    // release without leaving the Settings tab.
+    const fwCurrent = document.getElementById('fw-current');
+    if (fwCurrent) {
+      fwCurrent.textContent = state.fwVersion || '—';
+    }
     const line3 = document.createElement('div');
     line3.textContent = `${state.knownChannels.size} channel(s), ${state.knownNodes.size} node(s) known`;
     infoBody.append(line3);

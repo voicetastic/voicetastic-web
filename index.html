@@ -271,6 +271,31 @@
             </div>
           </div>
         </details>
+
+        <details class="setcard">
+          <summary>
+            <h3>⬆ Firmware update</h3>
+            <span class="hint">OTA via this client &mdash; coming soon</span>
+          </summary>
+          <div class="fields" style="grid-template-columns: 1fr;">
+            <div>
+              <strong>Installed:</strong>
+              <span id="fw-current" class="muted">—</span>
+            </div>
+            <p style="margin: 0; font-size: 0.9rem;">
+              OTA upload from this browser client is not yet implemented.
+              The transport (XModem-over-AdminMessage) is in the
+              Meshtastic protocol but the upload loop, CRC, retry, and
+              progress reporting are deliberately not wired here to
+              avoid bricking radios mid-transfer.
+            </p>
+            <p class="muted" style="margin: 0; font-size: 0.85rem;">
+              For now, flash via the
+              <a href="https://flasher.meshtastic.org/" target="_blank" rel="noopener">Meshtastic web flasher</a>
+              or <code>meshtastic --update</code> on the CLI.
+            </p>
+          </div>
+        </details>
       </section>
 
       <!-- ================================= MAP ================================= -->
