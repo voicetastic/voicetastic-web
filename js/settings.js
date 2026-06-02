@@ -117,6 +117,21 @@ const SECTIONS = [
     { name: 'mode', label: 'Pairing mode', type: 'enum', options: BT_MODES },
     { name: 'fixed_pin', label: 'Fixed PIN', type: 'int' },
   ]},
+  { key: 'mqtt', title: '☁ MQTT gateway', writeFn: 'writeMqttConfig', fields: [
+    { name: 'enabled', label: 'Enabled', type: 'bool' },
+    { name: 'address', label: 'Server address', type: 'text' },
+    { name: 'username', label: 'Username', type: 'text' },
+    { name: 'password', label: 'Password', type: 'text' },
+    { name: 'root', label: 'Root topic', type: 'text' },
+    { name: 'encryption_enabled', label: 'Send encrypted packets', type: 'bool' },
+    { name: 'json_enabled', label: 'JSON packets', type: 'bool' },
+    { name: 'tls_enabled', label: 'Use TLS', type: 'bool' },
+    { name: 'proxy_to_client_enabled', label: 'Proxy through client', type: 'bool' },
+    { name: 'map_reporting_enabled', label: 'Report node to public map', type: 'bool' },
+    { name: 'map_publish_interval_secs', label: 'Map publish interval (s)', type: 'int' },
+    { name: 'map_position_precision', label: 'Map position precision (bits)', type: 'int' },
+    { name: 'map_should_report_location', label: 'Opt-in: report location', type: 'bool' },
+  ]},
 ];
 
 // ---------- per-field input + read ----------

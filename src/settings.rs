@@ -11,7 +11,8 @@
 use serde::{Deserialize, Serialize};
 
 use voicetastic_core::proto::{
-    Channel, ChannelSettings, Config, Position, User, admin_message, config,
+    Channel, ChannelSettings, Config, ModuleConfig, Position, User, admin_message, config,
+    module_config,
 };
 use voicetastic_core::protocol::ProtocolState;
 
@@ -29,6 +30,7 @@ pub(crate) struct Snapshot {
     pub network: Option<NetworkDto>,
     pub display: Option<DisplayDto>,
     pub bluetooth: Option<BluetoothDto>,
+    pub mqtt: Option<MqttDto>,
     pub channels: Vec<ChannelDto>,
     /// Radio's last-known position, read from its own NodeInfo. `None`
     /// until the radio reports a position (e.g. no GPS fix and no fixed
@@ -123,6 +125,26 @@ pub(crate) struct BluetoothDto {
     pub fixed_pin: u32,
 }
 
+/// MQTT module-config DTO, mirroring `voicetastic_core::proto::
+/// module_config::MqttConfig` minus the nested `MapReportSettings`
+/// which we flatten into top-level fields for JS simplicity.
+#[derive(Serialize, Deserialize, Default)]
+pub(crate) struct MqttDto {
+    pub enabled: bool,
+    pub address: String,
+    pub username: String,
+    pub password: String,
+    pub root: String,
+    pub encryption_enabled: bool,
+    pub json_enabled: bool,
+    pub tls_enabled: bool,
+    pub proxy_to_client_enabled: bool,
+    pub map_reporting_enabled: bool,
+    pub map_publish_interval_secs: u32,
+    pub map_position_precision: u32,
+    pub map_should_report_location: bool,
+}
+
 #[derive(Serialize, Deserialize, Default)]
 pub(crate) struct ChannelDto {
     pub index: i32,
@@ -198,6 +220,7 @@ pub(crate) fn build_snapshot(state: &ProtocolState) -> Snapshot {
         network: state.network.as_ref().map(network_to_dto),
         display: state.display.as_ref().map(display_to_dto),
         bluetooth: state.bluetooth.as_ref().map(bluetooth_to_dto),
+        mqtt: state.mqtt.as_ref().map(mqtt_to_dto),
         channels: state.channels.iter().map(channel_to_dto).collect(),
         current_position,
     }
@@ -302,6 +325,25 @@ fn bluetooth_to_dto(c: &config::BluetoothConfig) -> BluetoothDto {
         enabled: c.enabled,
         mode: c.mode,
         fixed_pin: c.fixed_pin,
+    }
+}
+
+fn mqtt_to_dto(c: &module_config::MqttConfig) -> MqttDto {
+    let map = c.map_report_settings.as_ref();
+    MqttDto {
+        enabled: c.enabled,
+        address: c.address.clone(),
+        username: c.username.clone(),
+        password: c.password.clone(),
+        root: c.root.clone(),
+        encryption_enabled: c.encryption_enabled,
+        json_enabled: c.json_enabled,
+        tls_enabled: c.tls_enabled,
+        proxy_to_client_enabled: c.proxy_to_client_enabled,
+        map_reporting_enabled: c.map_reporting_enabled,
+        map_publish_interval_secs: map.map(|m| m.publish_interval_secs).unwrap_or(0),
+        map_position_precision: map.map(|m| m.position_precision).unwrap_or(0),
+        map_should_report_location: map.map(|m| m.should_report_location).unwrap_or(false),
     }
 }
 
@@ -485,6 +527,33 @@ pub(crate) fn bluetooth_payload(
     })
 }
 
+pub(crate) fn mqtt_payload(_state: &ProtocolState, dto: MqttDto) -> admin_message::PayloadVariant {
+    // The DTO carries every field MqttConfig has, so we don't overlay
+    // from the current snapshot (unlike the `Config` writers where the
+    // UI exposes a subset).
+    let map = module_config::MapReportSettings {
+        publish_interval_secs: dto.map_publish_interval_secs,
+        position_precision: dto.map_position_precision,
+        should_report_location: dto.map_should_report_location,
+    };
+    let updated = module_config::MqttConfig {
+        enabled: dto.enabled,
+        address: dto.address,
+        username: dto.username,
+        password: dto.password,
+        root: dto.root,
+        encryption_enabled: dto.encryption_enabled,
+        json_enabled: dto.json_enabled,
+        tls_enabled: dto.tls_enabled,
+        proxy_to_client_enabled: dto.proxy_to_client_enabled,
+        map_reporting_enabled: dto.map_reporting_enabled,
+        map_report_settings: if dto.map_reporting_enabled { Some(map) } else { None },
+    };
+    admin_message::PayloadVariant::SetModuleConfig(ModuleConfig {
+        payload_variant: Some(module_config::PayloadVariant::Mqtt(updated)),
+    })
+}
+
 pub(crate) fn channel_payload(state: &ProtocolState, dto: ChannelDto) -> admin_message::PayloadVariant {
     // Find the existing channel at that index so we preserve PSK + module
     // settings + any other fields the UI doesn't expose.
@@ -566,6 +635,7 @@ write_config!(write_power_config,     writePowerConfig,      PowerDto,     power
 write_config!(write_network_config,   writeNetworkConfig,    NetworkDto,   network_payload,   "network");
 write_config!(write_display_config,   writeDisplayConfig,    DisplayDto,   display_payload,   "display");
 write_config!(write_bluetooth_config, writeBluetoothConfig,  BluetoothDto, bluetooth_payload, "bluetooth");
+write_config!(write_mqtt_config,      writeMqttConfig,       MqttDto,      mqtt_payload,      "mqtt");
 write_config!(write_channel,          writeChannel,          ChannelDto,   channel_payload,   "channel");
 
 #[wasm_bindgen]

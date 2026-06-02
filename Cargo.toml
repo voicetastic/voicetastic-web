@@ -23,7 +23,7 @@ crate-type = ["cdylib", "rlib"]
 #   voicetastic-core = { path = "../voicetastic-desktop/crates/voicetastic-core",
 #                        default-features = false,
 #                        features = ["codec2", "denoise", "opus-wasm", "amrnb-wasm"] }
-voicetastic-core = { git = "https://github.com/voicetastic/voicetastic-core.git", rev = "612e47b56f4dc87c30f881526ebaef8dcba4ea67", default-features = false, features = ["codec2", "denoise", "opus-wasm", "amrnb-wasm"] }
+voicetastic-core = { git = "https://github.com/voicetastic/voicetastic-core.git", rev = "c33b0700ee5b96f4354cfda19ce90b63d3458ddb", default-features = false, features = ["codec2", "denoise", "opus-wasm", "amrnb-wasm"] }
 
 # Same prost as core (0.14) so the generated `proto` types share one trait impl.
 prost = "0.14"

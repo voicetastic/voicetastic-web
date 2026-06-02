@@ -125,6 +125,16 @@ pub fn build_event(ev: &InboundEvent, state: &ProtocolState) -> JsValue {
             set_str(&o, "section", which);
             set_str(&o, "text", &format!("Config: {which}"));
         }
+        InboundEvent::ModuleConfig(v) => {
+            use voicetastic_core::proto::module_config::PayloadVariant as Mc;
+            let which = match v {
+                Mc::Mqtt(_) => "mqtt",
+                _ => "other",
+            };
+            set_str(&o, "type", "module_config");
+            set_str(&o, "section", which);
+            set_str(&o, "text", &format!("ModuleConfig: {which}"));
+        }
         InboundEvent::Channel(ch) => {
             set_str(&o, "type", "channel");
             set_i32(&o, "index", ch.index);
