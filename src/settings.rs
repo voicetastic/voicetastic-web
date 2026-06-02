@@ -140,19 +140,34 @@ pub(crate) struct FixedPositionDto {
 }
 
 /// Flattened view of one peer's `NodeInfo` for the JS-side node list.
-/// Only the fields the UI actually shows are carried; if a richer panel
-/// is needed later (uptime, voltage, …) extend the struct.
+/// All fields the detail panel surfaces are carried so a single
+/// `listNodes()` call drives both the table summary and the per-row
+/// expanded detail; if a future panel needs even more (e.g. raw RSSI),
+/// extend the struct.
 #[derive(Serialize, Default)]
 pub(crate) struct NodeDto {
     pub num: u32,
     pub long_name: String,
     pub short_name: String,
+    pub hw_model: i32,
+    pub role: i32,
+    pub is_licensed: bool,
     pub snr: f32,
     pub last_heard: u32,
+    /// Latitude in 1e-7 degrees, when the node has reported a position.
+    pub latitude_i: Option<i32>,
+    pub longitude_i: Option<i32>,
+    pub altitude: Option<i32>,
     /// 0..100 battery percent, or `101` for AC-powered. `None` if the
     /// node hasn't reported device metrics yet.
     pub battery_level: Option<u32>,
+    pub voltage: Option<f32>,
+    pub channel_utilization: Option<f32>,
+    pub air_util_tx: Option<f32>,
+    pub uptime_seconds: Option<u32>,
     pub channel: u32,
+    pub via_mqtt: bool,
+    pub is_favorite: bool,
 }
 
 // ---------- builders: ProtocolState -> Snapshot ----------
@@ -580,14 +595,28 @@ impl WebClient {
             .filter(|n| Some(n.num) != my)
             .map(|n| {
                 let user = n.user.as_ref();
+                let pos = n.position.as_ref();
+                let metrics = n.device_metrics.as_ref();
                 NodeDto {
                     num: n.num,
                     long_name: user.map(|u| u.long_name.clone()).unwrap_or_default(),
                     short_name: user.map(|u| u.short_name.clone()).unwrap_or_default(),
+                    hw_model: user.map(|u| u.hw_model).unwrap_or(0),
+                    role: user.map(|u| u.role).unwrap_or(0),
+                    is_licensed: user.map(|u| u.is_licensed).unwrap_or(false),
                     snr: n.snr,
                     last_heard: n.last_heard,
-                    battery_level: n.device_metrics.as_ref().and_then(|m| m.battery_level),
+                    latitude_i: pos.and_then(|p| p.latitude_i),
+                    longitude_i: pos.and_then(|p| p.longitude_i),
+                    altitude: pos.and_then(|p| p.altitude),
+                    battery_level: metrics.and_then(|m| m.battery_level),
+                    voltage: metrics.and_then(|m| m.voltage),
+                    channel_utilization: metrics.and_then(|m| m.channel_utilization),
+                    air_util_tx: metrics.and_then(|m| m.air_util_tx),
+                    uptime_seconds: metrics.and_then(|m| m.uptime_seconds),
                     channel: n.channel,
+                    via_mqtt: n.via_mqtt,
+                    is_favorite: n.is_favorite,
                 }
             })
             .collect();

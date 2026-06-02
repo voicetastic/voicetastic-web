@@ -232,6 +232,16 @@ input[type='text']:focus, select:focus { outline: none; border-color: var(--acce
 }
 .nodes-list th { color: var(--text-muted); font-weight: 600; }
 .nodes-list .id { color: var(--text-muted); font-family: ui-monospace, monospace; }
+.nodes-list tr.node-row { cursor: pointer; }
+.nodes-list tr.node-row:hover { background: var(--bg-card-high); }
+.nodes-list tr.node-row.open { background: var(--bg-card-high); }
+.nodes-list tr.node-detail-row td { padding: 0.6rem 0.8rem; background: var(--bg-card-high); }
+.nodes-list dl.node-detail {
+  display: grid; grid-template-columns: 9rem 1fr;
+  row-gap: 0.2rem; column-gap: 0.8rem; margin: 0;
+}
+.nodes-list dl.node-detail dt { color: var(--text-muted); }
+.nodes-list dl.node-detail dd { margin: 0; }
 .voice-player { display: inline-flex; align-items: center; gap: 0.5rem; }
 .voice-player::before { content: '🎙️'; }
 .voice-play {

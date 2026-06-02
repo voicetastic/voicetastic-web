@@ -127,6 +127,11 @@ export function setMessageStatus(packetId, status) {
   }
 }
 
+/// Currently-expanded node detail row in the Chat-tab Nodes panel.
+/// `null` collapses every row; otherwise the matching `num` row renders
+/// an inline detail block underneath it.
+let expandedNodeNum = null;
+
 /// Re-render the Chat tab's Nodes panel from `client.listNodes()`. Called
 /// on the relevant events (`node_info`, `config_complete`, `disconnect`)
 /// so the list stays in sync without polling.
@@ -160,21 +165,72 @@ export function renderNodes() {
     return `${Math.floor(a / 86400)}d ago`;
   };
   const fmtBat = (b) => b == null ? '—' : (b === 101 ? 'AC' : `${b}%`);
+  const fmtUptime = (s) => {
+    if (s == null) return null;
+    const sec = s % 60, m = Math.floor(s / 60) % 60, h = Math.floor(s / 3600) % 24, d = Math.floor(s / 86400);
+    if (d > 0) return `${d}d ${h}h`;
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m ${sec}s`;
+    return `${sec}s`;
+  };
   const escape = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const hexId = (n) => `!${n.toString(16).padStart(8, '0')}`;
+
+  const detailRows = (n) => {
+    const lines = [];
+    lines.push(['Node id', `${hexId(n.num)} (${n.num})`]);
+    if (n.long_name) lines.push(['Long name', escape(n.long_name)]);
+    if (n.short_name) lines.push(['Short name', escape(n.short_name)]);
+    lines.push(['HW model', String(n.hw_model)]);
+    lines.push(['Role', String(n.role)]);
+    if (n.is_licensed) lines.push(['HAM', 'yes']);
+    lines.push(['Channel', String(n.channel)]);
+    if (n.last_heard) lines.push(['Last heard', `${fmtAge(n.last_heard)} (${n.last_heard})`]);
+    lines.push(['SNR', `${n.snr.toFixed(1)} dB`]);
+    if (n.latitude_i != null && n.longitude_i != null) {
+      const lat = (n.latitude_i / 1e7).toFixed(5);
+      const lon = (n.longitude_i / 1e7).toFixed(5);
+      lines.push(['Position', `${lat}, ${lon}`]);
+    }
+    if (n.altitude != null) lines.push(['Altitude', `${n.altitude} m`]);
+    if (n.battery_level != null) lines.push(['Battery', fmtBat(n.battery_level)]);
+    if (n.voltage != null) lines.push(['Voltage', `${n.voltage.toFixed(2)} V`]);
+    if (n.channel_utilization != null) lines.push(['Ch util', `${n.channel_utilization.toFixed(1)}%`]);
+    if (n.air_util_tx != null) lines.push(['Air util TX', `${n.air_util_tx.toFixed(1)}%`]);
+    const up = fmtUptime(n.uptime_seconds);
+    if (up) lines.push(['Uptime', up]);
+    if (n.via_mqtt) lines.push(['Via MQTT', 'yes']);
+    if (n.is_favorite) lines.push(['Favorite', 'yes']);
+    return lines.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+  };
+
   const tbody = rows.map((n) => {
-    const display = n.long_name || n.short_name || `!${n.num.toString(16).padStart(8, '0')}`;
-    return `<tr>
-      <td>${escape(display)}</td>
+    const display = n.long_name || n.short_name || hexId(n.num);
+    const isOpen = expandedNodeNum === n.num;
+    const summaryRow = `<tr data-num="${n.num}" class="node-row${isOpen ? ' open' : ''}">
+      <td>${isOpen ? '▾' : '▸'} ${escape(display)}</td>
       <td>${fmtAge(n.last_heard)}</td>
       <td>${n.snr.toFixed(1)} dB</td>
       <td>${fmtBat(n.battery_level)}</td>
-      <td class="id">!${n.num.toString(16).padStart(8, '0')}</td>
+      <td class="id">${hexId(n.num)}</td>
     </tr>`;
+    if (!isOpen) return summaryRow;
+    return summaryRow + `<tr class="node-detail-row"><td colspan="5"><dl class="node-detail">${detailRows(n)}</dl></td></tr>`;
   }).join('');
   listEl.innerHTML = `<table>
     <thead><tr><th>Node</th><th>Last heard</th><th>SNR</th><th>Battery</th><th>ID</th></tr></thead>
     <tbody>${tbody}</tbody>
   </table>`;
+
+  // Wire click handlers per row (no event-delegation gymnastics; we
+  // re-render on every node_info anyway so the live list isn't large).
+  for (const tr of listEl.querySelectorAll('tr.node-row')) {
+    tr.addEventListener('click', () => {
+      const num = parseInt(tr.dataset.num, 10);
+      expandedNodeNum = (expandedNodeNum === num) ? null : num;
+      renderNodes();
+    });
+  }
 }
 
 /// Render the currently-selected thread into the messages pane.
