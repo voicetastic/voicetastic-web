@@ -11,7 +11,7 @@
 // after an admin write. Each pending key resolves on the next matching
 // event or rejects via timeout.
 
-import { state, pushDebug } from './state.js';
+import { state, pushDebug, pushNodeSample } from './state.js';
 import { log, nodeAddr, setStatus, updateInfoCard } from './ui.js';
 import { ensureThread, routeIncoming, setMessageStatus, renderNodes } from './chat.js';
 
@@ -83,6 +83,14 @@ export function handleEvent(ev) {
       const name = ev.long_name || hex;
       state.knownNodes.set(hex, name);
       if (hex !== state.myNodeHex) ensureThread(`node:${hex}`, `DM — ${name} (${hex})`);
+      // Telemetry sample for the sparkline panel. battery_level is
+      // optional on the event (only present when the radio reported
+      // device_metrics); snr is always set (may be 0.0).
+      pushNodeSample(
+        ev.node_num,
+        typeof ev.battery_level === 'number' ? ev.battery_level : null,
+        typeof ev.snr === 'number' ? ev.snr : 0,
+      );
       updateInfoCard();
       renderNodes();
       break;

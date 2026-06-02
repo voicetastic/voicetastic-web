@@ -176,6 +176,28 @@ export function renderNodes() {
   const escape = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const hexId = (n) => `!${n.toString(16).padStart(8, '0')}`;
 
+  // Build a min-max-normalised SVG polyline of values inside a 160×24
+  // rect, the same dimensions desktop uses. `nullable` = true skips
+  // null/missing entries (battery is optional per-sample); otherwise
+  // 0s are kept (snr).
+  const sparkline = (values, lo, hi, color, nullable = false) => {
+    const filtered = nullable ? values.filter((v) => v != null) : values;
+    if (filtered.length < 2) return '';
+    const W = 160, H = 24;
+    const n = filtered.length;
+    const span = hi - lo || 1;
+    const pts = filtered.map((v, i) => {
+      const norm = Math.max(0, Math.min(1, (v - lo) / span));
+      const x = (W / (n - 1)) * i;
+      const y = H - norm * H;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(' ');
+    return `<svg class="spark" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">
+      <rect x="0.5" y="0.5" width="${W - 1}" height="${H - 1}" fill="none" stroke="${color}" stroke-opacity="0.25" />
+      <polyline fill="none" stroke="${color}" stroke-width="1.5" points="${pts}"/>
+    </svg>`;
+  };
+
   const detailRows = (n) => {
     const lines = [];
     lines.push(['Node id', `${hexId(n.num)} (${n.num})`]);
@@ -201,6 +223,18 @@ export function renderNodes() {
     if (up) lines.push(['Uptime', up]);
     if (n.via_mqtt) lines.push(['Via MQTT', 'yes']);
     if (n.is_favorite) lines.push(['Favorite', 'yes']);
+    // Telemetry sparklines, surfaced only when ≥ 2 samples have
+    // landed for this peer (battery 0–100, SNR scaled to typical
+    // mesh range of −20 dB..+20 dB).
+    const samples = state.nodeHistory.get(n.num) || [];
+    if (samples.length >= 2) {
+      const batt = samples.map((s) => s.battery);
+      const snr = samples.map((s) => s.snr);
+      const battSvg = sparkline(batt, 0, 100, '#78c878', true);
+      const snrSvg = sparkline(snr, -20, 20, '#78a0dc');
+      if (battSvg) lines.push(['Battery trend', battSvg]);
+      if (snrSvg) lines.push(['SNR trend', snrSvg]);
+    }
     return lines.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
   };
 

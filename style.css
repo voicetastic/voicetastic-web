@@ -242,6 +242,7 @@ input[type='text']:focus, select:focus { outline: none; border-color: var(--acce
 }
 .nodes-list dl.node-detail dt { color: var(--text-muted); }
 .nodes-list dl.node-detail dd { margin: 0; }
+.nodes-list dl.node-detail svg.spark { vertical-align: middle; }
 
 .debug-list {
   max-height: 60vh; overflow-y: auto;

@@ -24,6 +24,9 @@ fn set_u32(o: &js_sys::Object, k: &str, v: u32) {
 fn set_i32(o: &js_sys::Object, k: &str, v: i32) {
     set(o, k, &JsValue::from_f64(v as f64));
 }
+fn set_f32(o: &js_sys::Object, k: &str, v: f32) {
+    set(o, k, &JsValue::from_f64(v as f64));
+}
 
 // ---------- address formatting ----------
 
@@ -95,6 +98,17 @@ pub fn build_event(ev: &InboundEvent, state: &ProtocolState) -> JsValue {
             set_str(&o, "type", "node_info");
             set_u32(&o, "node_num", ni.num);
             set_str(&o, "long_name", name);
+            // Surface enough metrics on the event for the JS-side
+            // telemetry ring buffer to push a sample without needing
+            // a follow-up `listNodes()` call.
+            set_f32(&o, "snr", ni.snr);
+            if let Some(b) = ni
+                .device_metrics
+                .as_ref()
+                .and_then(|m| m.battery_level)
+            {
+                set_u32(&o, "battery_level", b);
+            }
             set_str(
                 &o,
                 "text",

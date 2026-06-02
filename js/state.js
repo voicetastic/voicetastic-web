@@ -33,6 +33,26 @@ export const state = {
 
 export const DEBUG_LOG_CAP = 500;
 
+/// Per-node history of telemetry samples (battery, snr). Keyed by
+/// node_num as a JS number. Each entry is a bounded array (cap 60)
+/// of `{ at, battery, snr }`. Fed from the `node_info` event handler
+/// and rendered as sparklines in the chat-tab node-detail panel.
+state.nodeHistory = new Map();
+export const NODE_HISTORY_CAP = 60;
+
+/// Append a telemetry sample for `nodeNum`, evicting FIFO past the
+/// cap. Skipped when neither battery nor snr has changed since the
+/// last sample to keep the buffer trend-shaped instead of repeating
+/// the same values from every NodeInfo broadcast.
+export function pushNodeSample(nodeNum, battery, snr) {
+  if (!state.nodeHistory.has(nodeNum)) state.nodeHistory.set(nodeNum, []);
+  const buf = state.nodeHistory.get(nodeNum);
+  const last = buf[buf.length - 1];
+  if (last && last.battery === battery && Math.abs(last.snr - snr) < 0.01) return;
+  buf.push({ at: Date.now(), battery, snr });
+  if (buf.length > NODE_HISTORY_CAP) buf.splice(0, buf.length - NODE_HISTORY_CAP);
+}
+
 /// Clear device-specific state — call between `disconnect()` and the
 /// next `connect()` so a fresh radio doesn't see stale node/channel
 /// names from the previous session.
