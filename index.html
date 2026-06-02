@@ -66,17 +66,20 @@
       <section id="page-connect" class="page">
         <h1>Connect your radio</h1>
         <p class="lead">
-          Plug in a Meshtastic radio over USB. Text and voice both run
+          Plug in a Meshtastic radio over USB <em>or</em> pair via
+          Bluetooth. Text and voice both run
           <code>voicetastic-core</code>'s protocol core in the browser — Codec2 (pure
-          Rust) for voice, RNNoise for capture-side denoise. Chrome/Edge or
-          Firefox&nbsp;151+ over <code>localhost</code> or HTTPS; voice also needs
-          mic permission.
+          Rust) for voice, RNNoise for capture-side denoise. Web Serial:
+          Chrome/Edge or Firefox&nbsp;151+. Web Bluetooth:
+          Chromium-only (Chrome / Edge / Opera). Either path needs
+          <code>localhost</code> or HTTPS; voice also needs mic permission.
         </p>
         <div class="row">
-          <button id="connect">Connect</button>
+          <button id="connect">Connect (USB)</button>
+          <button id="connect-ble" class="ghost">Connect (Bluetooth)</button>
           <button id="disconnect" class="ghost" hidden>Disconnect</button>
           <button id="discover" class="ghost" hidden disabled>🔍 Scan for nodes</button>
-          <span id="connect-hint" class="muted">Click Connect, then pick the serial port.</span>
+          <span id="connect-hint" class="muted">Pick a transport above, then approve the device in the browser prompt.</span>
         </div>
         <div id="info" class="card" hidden>
           <h3>Device</h3>

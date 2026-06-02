@@ -62,4 +62,17 @@ features = [
   "ReadableStreamReadResult",
   "WritableStream",
   "WritableStreamDefaultWriter",
+  # Web Bluetooth API — Chromium-only today (Chrome, Edge, Opera).
+  # Firefox + Safari users get the Web Serial path; the Connect page
+  # surfaces both buttons but disables BLE when `navigator.bluetooth`
+  # is missing.
+  "Bluetooth",
+  "BluetoothDevice",
+  "BluetoothRemoteGattServer",
+  "BluetoothRemoteGattService",
+  "BluetoothRemoteGattCharacteristic",
+  "RequestDeviceOptions",
+  "BluetoothLeScanFilterInit",
+  "Event",
+  "EventTarget",
 ]

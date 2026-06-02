@@ -10,7 +10,7 @@
 //   settings.js  — Settings page (Meshtastic + Audio)
 //   app.js       — this file: bootstrap, routing, connect lifecycle
 
-import init, { connect } from '../pkg/voicetastic_web.js';
+import init, { connect, connectBle } from '../pkg/voicetastic_web.js';
 import { state, resetDeviceState } from './state.js';
 import { log, setStatus } from './ui.js';
 import { handleEvent, setEventHooks } from './events.js';
@@ -22,6 +22,7 @@ import { renderMap } from './map.js';
 // ---------- DOM refs owned by this module ----------
 
 const connectBtn = document.getElementById('connect');
+const connectBleBtn = document.getElementById('connect-ble');
 const disconnectBtn = document.getElementById('disconnect');
 const discoverBtn = document.getElementById('discover');
 const connectHint = document.getElementById('connect-hint');
@@ -115,7 +116,16 @@ function setConnectedUi(on) {
   if (!on) discoverBtn.disabled = true; // re-enabled at next ConfigComplete
   connectBtn.hidden = on;
   connectBtn.disabled = on;
+  connectBleBtn.hidden = on;
+  // BLE button stays enabled-and-shown unless connected (matching the
+  // serial button) — its disabled state is owned by the capability
+  // check below.
+  if (!on && hasWebBluetooth()) connectBleBtn.disabled = false;
   disconnectBtn.hidden = !on;
+}
+
+function hasWebBluetooth() {
+  return typeof navigator !== 'undefined' && 'bluetooth' in navigator;
 }
 
 // events.js doesn't know about settings or the connect-page UI; let it
@@ -136,31 +146,68 @@ initDebug();
 
 // ---------- bootstrap ----------
 
-if (!('serial' in navigator)) {
-  log('Web Serial unavailable. Use Chrome/Edge or Firefox 151+ over localhost/HTTPS.');
+// Either transport is enough; only fully bail if neither is present.
+const hasSerial = 'serial' in navigator;
+const hasBle = hasWebBluetooth();
+if (!hasSerial && !hasBle) {
+  log('Neither Web Serial nor Web Bluetooth is available in this browser.');
   connectBtn.disabled = true;
+  connectBleBtn.disabled = true;
   setStatus('Unsupported', 'error');
 } else {
+  if (!hasSerial) {
+    connectBtn.disabled = true;
+    log('Web Serial unavailable; use the Bluetooth path.');
+  }
+  if (!hasBle) {
+    connectBleBtn.disabled = true;
+    connectBleBtn.title = 'Web Bluetooth requires a Chromium-based browser (Chrome / Edge / Opera).';
+  }
   await init();
   log('WASM loaded. Ready to connect.');
 
+  /// Shared post-connect bookkeeping for both Serial and BLE paths.
+  /// Mirrors the previous inline body of the Serial onclick handler.
+  const onClientConnected = (client) => {
+    state.client = client;
+    log('Connected. Config handshake in flight…');
+    setStatus('Connected', 'connecting');
+    connectHint.textContent = 'Connected — waiting for ConfigComplete…';
+    setConnectedUi(true);
+    renderChat();
+  };
+
   connectBtn.onclick = async () => {
     connectBtn.disabled = true;
+    connectBleBtn.disabled = true;
     setStatus('Connecting…', 'connecting');
     connectHint.textContent = 'Pick a serial port in the browser prompt…';
     log('Requesting port…');
     try {
-      state.client = await connect(handleEvent, onVoice);
-      log('Connected. Config handshake in flight…');
-      setStatus('Connected', 'connecting');
-      connectHint.textContent = 'Connected — waiting for ConfigComplete…';
-      setConnectedUi(true);
-      renderChat(); // refresh placeholder text
+      onClientConnected(await connect(handleEvent, onVoice));
     } catch (e) {
       log('❌ ' + e);
       setStatus('Disconnected');
-      connectBtn.disabled = false;
-      connectHint.textContent = 'Click Connect, then pick the serial port.';
+      connectBtn.disabled = !hasSerial;
+      connectBleBtn.disabled = !hasBle;
+      connectHint.textContent = 'Pick a transport above, then approve the device in the browser prompt.';
+    }
+  };
+
+  connectBleBtn.onclick = async () => {
+    connectBtn.disabled = true;
+    connectBleBtn.disabled = true;
+    setStatus('Connecting…', 'connecting');
+    connectHint.textContent = 'Pick a Meshtastic device in the Bluetooth prompt…';
+    log('Requesting BLE device…');
+    try {
+      onClientConnected(await connectBle(handleEvent, onVoice));
+    } catch (e) {
+      log('❌ ' + e);
+      setStatus('Disconnected');
+      connectBtn.disabled = !hasSerial;
+      connectBleBtn.disabled = !hasBle;
+      connectHint.textContent = 'Pick a transport above, then approve the device in the browser prompt.';
     }
   };
 

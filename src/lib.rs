@@ -12,6 +12,7 @@
 //! (Web Serial, framing, and ferrying events to a JS callback). That's the
 //! point of the sans-IO refactor: one protocol implementation, two drivers.
 
+mod ble;
 mod events;
 mod serial;
 mod settings;
@@ -47,15 +48,40 @@ pub(crate) const DEFAULT_PACING_MS: u64 = 250;
 /// Shared per-connection state. `!Send` (holds JS handles), which is fine on
 /// wasm's single thread. `pub(crate)` so sibling modules (voice, settings)
 /// can carry their own `impl Inner` blocks.
+/// Transport-specific handles. One per connection; the rest of `Inner`
+/// is transport-agnostic (state, voice pipeline, codec selection,
+/// telemetry). `Serial` covers Web Serial / USB; `Ble` covers Web
+/// Bluetooth on Chromium-based browsers.
+pub(crate) enum InnerTransport {
+    Serial {
+        /// Kept alive so the connection persists; closed explicitly
+        /// by [`WebClient::disconnect`].
+        port: web_sys::SerialPort,
+        writer: web_sys::WritableStreamDefaultWriter,
+        /// Held here (rather than as a local in `read_loop`) so
+        /// `disconnect()` can cancel it, which causes the loop's
+        /// pending `read()` to resolve with `done: true` and exit
+        /// cleanly.
+        reader: web_sys::ReadableStreamDefaultReader,
+    },
+    Ble {
+        /// Holds the GATT connection alive. Calling
+        /// `device.gatt().disconnect()` in `disconnect()` is what
+        /// shuts the BLE link down.
+        device: web_sys::BluetoothDevice,
+        from_radio: web_sys::BluetoothRemoteGattCharacteristic,
+        to_radio: web_sys::BluetoothRemoteGattCharacteristic,
+        /// Set to `true` by `disconnect()` so the polling read loop
+        /// exits on the next tick instead of looping forever after
+        /// the GATT link drops.
+        stopped: std::cell::Cell<bool>,
+    },
+}
+
 pub(crate) struct Inner {
-    /// The serial port handle. Kept alive so the connection persists, and
-    /// closed explicitly by [`WebClient::disconnect`] for a graceful teardown.
-    pub(crate) port: web_sys::SerialPort,
-    pub(crate) writer: web_sys::WritableStreamDefaultWriter,
-    /// Inbound stream reader. Held on `Inner` (rather than as a local in
-    /// `read_loop`) so `disconnect()` can cancel it, which causes the loop's
-    /// pending `read()` to resolve with `done: true` and exit cleanly.
-    pub(crate) reader: web_sys::ReadableStreamDefaultReader,
+    /// Active transport for this connection. Match on it for every
+    /// per-transport hot path (write_payload, read loop, disconnect).
+    pub(crate) transport: InnerTransport,
     /// The canonical protocol snapshot — core's `ProtocolState`, exactly as the
     /// native driver uses it.
     pub(crate) state: RefCell<ProtocolState>,
@@ -119,7 +145,10 @@ impl Inner {
         id
     }
 
-    /// Encode a `ToRadio` payload, frame it, and write it to the port.
+    /// Encode a `ToRadio` payload and ship it via the active
+    /// transport. Serial wraps the bytes in the `0x94 0xc3 + length`
+    /// frame; BLE writes the raw protobuf to the `toRadio`
+    /// characteristic with no extra framing.
     pub(crate) async fn write_payload(
         &self,
         payload: voicetastic_core::proto::to_radio::PayloadVariant,
@@ -129,9 +158,16 @@ impl Inner {
         };
         let mut buf = Vec::with_capacity(msg.encoded_len());
         msg.encode(&mut buf).map_err(|e| err(&format!("encode: {e}")))?;
-        let frame = frame_serial(&buf);
-        let chunk = js_sys::Uint8Array::from(frame.as_slice());
-        JsFuture::from(self.writer.write_with_chunk(chunk.as_ref())).await?;
+        match &self.transport {
+            InnerTransport::Serial { writer, .. } => {
+                let frame = frame_serial(&buf);
+                let chunk = js_sys::Uint8Array::from(frame.as_slice());
+                JsFuture::from(writer.write_with_chunk(chunk.as_ref())).await?;
+            }
+            InnerTransport::Ble { to_radio, .. } => {
+                ble::write_to_radio(to_radio, &buf).await?;
+            }
+        }
         Ok(())
     }
 
@@ -299,9 +335,23 @@ impl WebClient {
     #[wasm_bindgen(js_name = disconnect)]
     pub fn disconnect(self) -> js_sys::Promise {
         future_to_promise(async move {
-            let _ = JsFuture::from(self.inner.reader.cancel()).await;
-            let _ = JsFuture::from(self.inner.writer.close()).await;
-            let _ = JsFuture::from(self.inner.port.close()).await;
+            match &self.inner.transport {
+                InnerTransport::Serial { port, writer, reader } => {
+                    let _ = JsFuture::from(reader.cancel()).await;
+                    let _ = JsFuture::from(writer.close()).await;
+                    let _ = JsFuture::from(port.close()).await;
+                }
+                InnerTransport::Ble { device, stopped, .. } => {
+                    // Flip the stop flag so the polling read loop
+                    // exits on its next tick instead of looping
+                    // against a dead characteristic.
+                    stopped.set(true);
+                    // GATT disconnect handle drops the connection.
+                    if let Some(gatt) = device.gatt() {
+                        gatt.disconnect();
+                    }
+                }
+            }
             Ok(JsValue::UNDEFINED)
         })
     }
@@ -338,9 +388,7 @@ pub async fn connect(
         port.readable().get_reader().dyn_into()?;
 
     let inner = Rc::new(Inner {
-        port,
-        writer,
-        reader,
+        transport: InnerTransport::Serial { port, writer, reader },
         state: RefCell::new(ProtocolState::default()),
         next_id: Cell::new(rand_u32()),
         assembler: VoiceAssembler::new(AssemblerConfig::default()),
@@ -360,7 +408,7 @@ pub async fn connect(
     // The reader itself lives on `Inner` so `disconnect()` can cancel it.
     let rx = inner.clone();
     wasm_bindgen_futures::spawn_local(async move {
-        if let Err(e) = read_loop(rx, on_event, on_voice).await {
+        if let Err(e) = serial_read_loop(rx, on_event, on_voice).await {
             log(&format!("serial read loop ended: {e:?}"));
         }
     });
@@ -394,18 +442,150 @@ pub async fn connect(
     Ok(WebClient { inner })
 }
 
-/// Read frames off the port forever, feeding each through the core decoder and
-/// applying snapshot events to the shared `ProtocolState`. Exits with
-/// `Ok(())` when the reader is cancelled (graceful disconnect) or with `Err`
-/// on transport failure (e.g. the cable was unplugged).
-async fn read_loop(
+/// Connect to a user-selected Meshtastic radio over Web Bluetooth and
+/// start driving `voicetastic_core`'s protocol core. Mirrors
+/// [`connect`] but uses GATT instead of Web Serial.
+///
+/// Must be called from a user gesture (the BLE picker requires it).
+/// Available only on Chromium-based browsers — Firefox + Safari fall
+/// back to the Web Serial path.
+#[wasm_bindgen(js_name = connectBle)]
+pub async fn connect_ble(
+    on_event: js_sys::Function,
+    on_voice: js_sys::Function,
+) -> Result<WebClient, JsValue> {
+    let handles = ble::open().await?;
+    log(&format!(
+        "ble: connected to '{}' ({})",
+        handles.device.name().unwrap_or_else(|| "<unknown>".into()),
+        handles.device.id(),
+    ));
+
+    let inner = Rc::new(Inner {
+        transport: InnerTransport::Ble {
+            device: handles.device,
+            from_radio: handles.from_radio,
+            to_radio: handles.to_radio,
+            stopped: std::cell::Cell::new(false),
+        },
+        state: RefCell::new(ProtocolState::default()),
+        next_id: Cell::new(rand_u32()),
+        assembler: VoiceAssembler::new(AssemblerConfig::default()),
+        registry: OutgoingVoiceRegistry::default(),
+        queue_free: Cell::new(u32::MAX),
+        denoise_enabled: Cell::new(true),
+        codec_param: Cell::new(DEFAULT_CODEC2_MODE),
+        send_codec: Cell::new(0),
+        amrnb_mode: Cell::new(5),
+        opus_kbps: Cell::new(12),
+        fec_mode: Cell::new(0),
+        last_inbound_at: Cell::new(web_time::Instant::now()),
+        silent_probes: Cell::new(0),
+    });
+
+    let rx = inner.clone();
+    wasm_bindgen_futures::spawn_local(async move {
+        if let Err(e) = ble_read_loop(rx, on_event, on_voice).await {
+            log(&format!("ble read loop ended: {e:?}"));
+        }
+    });
+    let nack_inner = inner.clone();
+    wasm_bindgen_futures::spawn_local(async move {
+        nack_tick_loop(nack_inner).await;
+    });
+
+    wasm_bindgen_futures::spawn_local(async {
+        if let Err(e) = amrnb_init().await {
+            log(&format!("amrnb shim init failed: {e:?}"));
+        }
+    });
+    wasm_bindgen_futures::spawn_local(async {
+        if let Err(e) = opus_init().await {
+            log(&format!("opus shim init failed: {e:?}"));
+        }
+    });
+
+    let nonce = rand_u32();
+    inner.write_payload(protocol::want_config(nonce)).await?;
+    log(&format!("ble: sent WantConfigId nonce={nonce}"));
+
+    Ok(WebClient { inner })
+}
+
+/// Process one decoded `FromRadio` payload — common to both the
+/// Web Serial deframed-stream loop and the Web Bluetooth one-protobuf-
+/// per-read loop. Extracted to keep the two read loops focussed on
+/// their transport quirks (framing vs polling).
+fn process_payload(
+    inner: &Rc<Inner>,
+    payload: &[u8],
+    on_event: &js_sys::Function,
+    on_voice: &js_sys::Function,
+) {
+    // Any well-formed frame (snapshot, voice, data, queue status,
+    // routing ack) is proof the radio's host pipe is still alive.
+    // Reset the silence timer here so the idle-probe in
+    // `nack_tick_loop` only fires when the radio actually goes quiet,
+    // not just when there's no voice traffic.
+    inner.last_inbound_at.set(web_time::Instant::now());
+    inner.silent_probes.set(0);
+    // Hold the immutable borrow for the duration of decode — the
+    // ctx carries `&state.nodes`. Drop it before the apply loop
+    // below mutably borrows. `our_private_key` is intentionally
+    // `None`: PKC DM decrypt isn't wired in the browser yet, so
+    // PKC-encrypted packets that bypassed firmware decrypt remain
+    // unreadable here (same behaviour as before the PKC work).
+    let events = {
+        let state = inner.state.borrow();
+        let ctx = InboundCtx {
+            my_node_num: state.my_info.as_ref().map(|i| i.my_node_num),
+            our_private_key: None,
+            nodes: &state.nodes,
+        };
+        protocol::decode_inbound(payload, &ctx)
+    };
+    match events {
+        Ok(events) => {
+            for ev in events {
+                if ev.is_snapshot() {
+                    inner.state.borrow_mut().apply(&ev);
+                }
+                match &ev {
+                    // Track queue depth for voice TX backpressure; still
+                    // forward the structured event so the JS log shows it.
+                    InboundEvent::QueueStatus(qs) => {
+                        inner.queue_free.set(qs.free);
+                        emit(on_event, &build_event(&ev, &inner.state.borrow()));
+                    }
+                    // Voice frames go through core's reassembler; a
+                    // completed message is decoded and handed to JS.
+                    InboundEvent::Voice(vd) => {
+                        handle_voice(inner, vd, on_event, on_voice);
+                    }
+                    _ => emit(on_event, &build_event(&ev, &inner.state.borrow())),
+                }
+            }
+        }
+        Err(e) => log(&format!("decode FromRadio failed: {e}")),
+    }
+}
+
+/// Read frames off the port forever, feeding each through the core
+/// decoder. Exits with `Ok(())` when the reader is cancelled
+/// (graceful disconnect) or with `Err` on transport failure (e.g.
+/// the cable was unplugged).
+async fn serial_read_loop(
     inner: Rc<Inner>,
     on_event: js_sys::Function,
     on_voice: js_sys::Function,
 ) -> Result<(), JsValue> {
+    let reader = match &inner.transport {
+        InnerTransport::Serial { reader, .. } => reader.clone(),
+        InnerTransport::Ble { .. } => unreachable!("serial_read_loop called on BLE transport"),
+    };
     let mut buf: Vec<u8> = Vec::new();
     loop {
-        let result = JsFuture::from(inner.reader.read()).await?;
+        let result = JsFuture::from(reader.read()).await?;
         let done = js_sys::Reflect::get(&result, &JsValue::from_str("done"))?
             .as_bool()
             .unwrap_or(false);
@@ -423,51 +603,48 @@ async fn read_loop(
             if payload.is_empty() {
                 continue; // resync marker
             }
-            // Any well-formed frame (snapshot, voice, data, queue status,
-            // routing ack) is proof the radio's host pipe is still alive.
-            // Reset the silence timer here so the idle-probe in
-            // `nack_tick_loop` only fires when the radio actually goes
-            // quiet, not just when there's no voice traffic.
-            inner.last_inbound_at.set(web_time::Instant::now());
-            inner.silent_probes.set(0);
-            // Hold the immutable borrow for the duration of decode — the
-            // ctx carries `&state.nodes`. Drop it before the apply loop
-            // below mutably borrows. `our_private_key` is intentionally
-            // `None`: PKC DM decrypt isn't wired in the browser yet, so
-            // PKC-encrypted packets that bypassed firmware decrypt remain
-            // unreadable here (same behaviour as before the PKC work).
-            let events = {
-                let state = inner.state.borrow();
-                let ctx = InboundCtx {
-                    my_node_num: state.my_info.as_ref().map(|i| i.my_node_num),
-                    our_private_key: None,
-                    nodes: &state.nodes,
-                };
-                protocol::decode_inbound(&payload, &ctx)
-            };
-            match events {
-                Ok(events) => {
-                    for ev in events {
-                        if ev.is_snapshot() {
-                            inner.state.borrow_mut().apply(&ev);
-                        }
-                        match &ev {
-                            // Track queue depth for voice TX backpressure; still
-                            // forward the structured event so the JS log shows it.
-                            InboundEvent::QueueStatus(qs) => {
-                                inner.queue_free.set(qs.free);
-                                emit(&on_event, &build_event(&ev, &inner.state.borrow()));
-                            }
-                            // Voice frames go through core's reassembler; a
-                            // completed message is decoded and handed to JS.
-                            InboundEvent::Voice(vd) => {
-                                handle_voice(&inner, vd, &on_event, &on_voice);
-                            }
-                            _ => emit(&on_event, &build_event(&ev, &inner.state.borrow())),
-                        }
-                    }
-                }
-                Err(e) => log(&format!("decode FromRadio failed: {e}")),
+            process_payload(&inner, &payload, &on_event, &on_voice);
+        }
+    }
+}
+
+/// Poll the BLE `fromRadio` characteristic forever, feeding each
+/// already-deframed protobuf through the core decoder. The polling
+/// cadence is set per-state: tight (50 ms) right after a write so we
+/// pick up the response, otherwise relaxed (250 ms) to avoid burning
+/// the radio's BLE controller. Exits when `transport.stopped` is set
+/// by `disconnect()`.
+async fn ble_read_loop(
+    inner: Rc<Inner>,
+    on_event: js_sys::Function,
+    on_voice: js_sys::Function,
+) -> Result<(), JsValue> {
+    use crate::util::sleep_ms;
+    loop {
+        let (from_radio, stopped) = match &inner.transport {
+            InnerTransport::Ble { from_radio, stopped, .. } => {
+                (from_radio.clone(), stopped.get())
+            }
+            InnerTransport::Serial { .. } => {
+                unreachable!("ble_read_loop called on serial transport")
+            }
+        };
+        if stopped {
+            return Ok(());
+        }
+        match ble::read_from_radio(&from_radio).await {
+            Ok(Some(bytes)) => {
+                process_payload(&inner, &bytes, &on_event, &on_voice);
+                // Burst: keep draining while there's data, only
+                // sleeping once the radio reports empty.
+                continue;
+            }
+            Ok(None) => {
+                sleep_ms(250).await;
+            }
+            Err(e) => {
+                log(&format!("ble read error: {e:?}"));
+                return Err(e);
             }
         }
     }
