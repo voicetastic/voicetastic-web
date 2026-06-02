@@ -1512,7 +1512,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "voicetastic-core"
 version = "0.0.0-git"
-source = "git+https://github.com/voicetastic/voicetastic-core.git?rev=c33b0700ee5b96f4354cfda19ce90b63d3458ddb#c33b0700ee5b96f4354cfda19ce90b63d3458ddb"
+source = "git+https://github.com/voicetastic/voicetastic-core.git?rev=f30114b277175399199836ec486b96559af458e9#f30114b277175399199836ec486b96559af458e9"
 dependencies = [
  "aes",
  "async-trait",

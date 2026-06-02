@@ -14,7 +14,7 @@ use voicetastic_core::proto::{
     Channel, ChannelSettings, Config, ModuleConfig, Position, User, admin_message, config,
     module_config,
 };
-use voicetastic_core::protocol::ProtocolState;
+use voicetastic_core::protocol::{self, ProtocolState};
 
 // ---------- read-side snapshot ----------
 
@@ -705,6 +705,51 @@ impl WebClient {
             let payload = fixed_position_payload(dto);
             inner.send_admin(payload).await?;
             Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// One-shot Position broadcast on the mesh (POSITION_APP, port 3).
+    /// `to == undefined` broadcasts; otherwise the packet is addressed
+    /// to that node num. The lat/lon/alt values are the same fixed-
+    /// point representation [`setFixedPosition`] takes (lat * 1e7,
+    /// lon * 1e7, altitude in metres). Distinct from
+    /// [`setFixedPosition`] which writes a config admin message to
+    /// the local radio (and does not emit a mesh packet).
+    #[wasm_bindgen(js_name = broadcastPosition)]
+    pub fn broadcast_position(
+        &self,
+        dto: JsValue,
+        channel: u32,
+        to: Option<u32>,
+    ) -> js_sys::Promise {
+        use prost::Message as _;
+        use voicetastic_core::ports::POSITION_APP;
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let dto: FixedPositionDto = serde_wasm_bindgen::from_value(dto)
+                .map_err(|e| err(&format!("position dto: {e}")))?;
+            let position = Position {
+                latitude_i: Some(dto.latitude_i),
+                longitude_i: Some(dto.longitude_i),
+                altitude: Some(dto.altitude),
+                ..Default::default()
+            };
+            let mut buf = Vec::with_capacity(position.encoded_len());
+            position
+                .encode(&mut buf)
+                .map_err(|e| err(&format!("encode position: {e}")))?;
+            let id = inner.alloc_id();
+            let pv = protocol::data_packet(
+                id,
+                POSITION_APP as i32,
+                buf,
+                channel,
+                to,
+                false,
+                false,
+            );
+            inner.write_payload(pv).await?;
+            Ok(JsValue::from(id))
         })
     }
 }

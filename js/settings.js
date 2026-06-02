@@ -291,6 +291,14 @@ function renderFixedCoordsBox(current) {
   setBtn.type = 'button';
   setBtn.textContent = 'Set coordinates';
   actions.append(setBtn);
+  // Companion button: emit the same lat/lon/alt as a one-shot mesh
+  // packet on POSITION_APP, distinct from setFixedPosition above
+  // (which writes config-side only and doesn't broadcast).
+  const broadcastBtn = document.createElement('button');
+  broadcastBtn.className = 'ghost';
+  broadcastBtn.type = 'button';
+  broadcastBtn.textContent = 'Broadcast now';
+  actions.append(broadcastBtn);
   box.append(actions);
 
   setBtn.onclick = async (e) => {
@@ -329,6 +337,36 @@ function renderFixedCoordsBox(current) {
       log(`❌ set coordinates: ${err}`);
       setBtn.textContent = '✗ Failed';
       setTimeout(() => { setBtn.textContent = prev; setBtn.disabled = false; }, 2000);
+    }
+  };
+
+  broadcastBtn.onclick = async (e) => {
+    e.stopPropagation();
+    const lat = parseFloat(latInput.value);
+    const lon = parseFloat(lonInput.value);
+    const alt = parseInt(altInput.value || '0', 10);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      log('❌ enter latitude and longitude in decimal degrees first');
+      return;
+    }
+    const dto = {
+      latitude_i: Math.round(lat * 1e7),
+      longitude_i: Math.round(lon * 1e7),
+      altitude: Number.isFinite(alt) ? alt : 0,
+    };
+    const prev = broadcastBtn.textContent;
+    broadcastBtn.disabled = true;
+    broadcastBtn.textContent = 'Broadcasting…';
+    try {
+      // channel 0 + no `to` = broadcast on the primary channel.
+      const id = await state.client.broadcastPosition(dto, 0, undefined);
+      log(`  ⟶ broadcast position ${lat.toFixed(7)}, ${lon.toFixed(7)} @ ${dto.altitude} m (id=${id})`);
+      broadcastBtn.textContent = '✓ Sent';
+    } catch (err) {
+      log(`❌ broadcast position: ${err}`);
+      broadcastBtn.textContent = '✗ Failed';
+    } finally {
+      setTimeout(() => { broadcastBtn.textContent = prev; broadcastBtn.disabled = false; }, 1800);
     }
   };
 
