@@ -86,17 +86,35 @@ pub async fn open() -> Result<BleHandles, JsValue> {
         .await?
         .dyn_into()?;
 
+    let chars = discover_chars(&device).await?;
+    Ok(BleHandles {
+        device,
+        from_radio: chars.from_radio,
+        to_radio: chars.to_radio,
+        from_num: chars.from_num,
+    })
+}
+
+/// Connect (or reconnect) to an already-known device, re-discover the
+/// Meshtastic service, and return fresh characteristic handles. Used
+/// by the initial `open()` path and by the reconnect campaign after
+/// `gattserverdisconnected`. Doesn't pop the picker — the caller
+/// must already have a `BluetoothDevice` reference (which means a
+/// previous successful `open()` in the same tab session, or the
+/// browser remembered the permission for this origin).
+pub async fn discover_chars(
+    device: &web_sys::BluetoothDevice,
+) -> Result<BleChars, JsValue> {
     let gatt = device
         .gatt()
         .ok_or_else(|| err("device has no GATT server"))?;
-    let server: web_sys::BluetoothRemoteGattServer = JsFuture::from(gatt.connect()).await?.dyn_into()?;
-
+    let server: web_sys::BluetoothRemoteGattServer =
+        JsFuture::from(gatt.connect()).await?.dyn_into()?;
     let service: web_sys::BluetoothRemoteGattService = JsFuture::from(
         server.get_primary_service_with_str(MESHTASTIC_SERVICE_UUID),
     )
     .await?
     .dyn_into()?;
-
     let from_radio: web_sys::BluetoothRemoteGattCharacteristic = JsFuture::from(
         service.get_characteristic_with_str(FROM_RADIO_CHARACTERISTIC),
     )
@@ -119,12 +137,20 @@ pub async fn open() -> Result<BleHandles, JsValue> {
     .ok()
     .and_then(|v| v.dyn_into().ok());
 
-    Ok(BleHandles {
-        device,
+    Ok(BleChars {
         from_radio,
         to_radio,
         from_num,
     })
+}
+
+/// The three characteristic handles obtained by service discovery.
+/// Re-acquired on each reconnect because Web Bluetooth invalidates
+/// `BluetoothRemoteGattCharacteristic` instances after a disconnect.
+pub struct BleChars {
+    pub from_radio: web_sys::BluetoothRemoteGattCharacteristic,
+    pub to_radio: web_sys::BluetoothRemoteGattCharacteristic,
+    pub from_num: Option<web_sys::BluetoothRemoteGattCharacteristic>,
 }
 
 /// Handles to the three Meshtastic GATT endpoints. Held on `Inner` so
