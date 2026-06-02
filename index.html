@@ -30,6 +30,7 @@
           <li><a href="#/chat" data-route="chat">Chat</a></li>
           <li><a href="#/settings" data-route="settings">Settings</a></li>
           <li><a href="#/map" data-route="map">Map</a></li>
+          <li><a href="#/debug" data-route="debug">Debug</a></li>
           <li class="nav-sep" aria-hidden="true"></li>
           <li>
             <a
@@ -266,6 +267,33 @@
           Mesh map view — known nodes plotted by reported position. Placeholder for now.
         </p>
         <div class="map-stub">Map view coming soon.</div>
+      </section>
+
+      <!-- ================================= DEBUG ================================ -->
+      <section id="page-debug" class="page">
+        <h1>Debug</h1>
+        <p class="lead">
+          Structured event log captured from inbound radio events and
+          client actions. Useful for diagnosing radio handshakes, voice
+          assembly, and admin writes. Filters and the entries themselves
+          are local to this browser session.
+        </p>
+        <div class="row" style="margin-bottom:1rem;">
+          <label for="debug-source" class="muted" style="font-size:0.85rem;">Source:</label>
+          <select id="debug-source">
+            <option value="">all</option>
+          </select>
+          <label for="debug-level" class="muted" style="font-size:0.85rem;">Level:</label>
+          <select id="debug-level">
+            <option value="">all</option>
+            <option value="info">info</option>
+            <option value="warn">warn</option>
+            <option value="error">error</option>
+          </select>
+          <button id="debug-clear" class="ghost">Clear</button>
+          <span id="debug-count" class="muted" style="margin-left:auto;font-size:0.85rem;">0 entries</span>
+        </div>
+        <div id="debug-list" class="debug-list muted">No events yet.</div>
       </section>
     </main>
 

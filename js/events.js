@@ -11,7 +11,7 @@
 // after an admin write. Each pending key resolves on the next matching
 // event or rejects via timeout.
 
-import { state } from './state.js';
+import { state, pushDebug } from './state.js';
 import { log, nodeAddr, setStatus, updateInfoCard } from './ui.js';
 import { ensureThread, routeIncoming, setMessageStatus, renderNodes } from './chat.js';
 
@@ -56,6 +56,9 @@ function fireApplyConfirm(key) {
 /// Dispatch one structured event from the wasm driver.
 export function handleEvent(ev) {
   log('  ⟵ ' + ev.text);
+  // Every inbound event is also recorded into the structured debug
+  // log under a per-type source so the Debug tab can filter on it.
+  pushDebug(ev.type || 'event', ev.text || JSON.stringify(ev));
   switch (ev.type) {
     case 'my_info': {
       state.myNodeNum = ev.node_num;

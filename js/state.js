@@ -24,7 +24,14 @@ export const state = {
   /// counts. Mirrored on disconnect.
   knownChannels: new Map(),
   knownNodes: new Map(),
+
+  /// Structured ring buffer of inbound events for the Debug tab. Each
+  /// entry: { at: epoch_ms, level: 'info'|'warn'|'error', source, msg }.
+  /// FIFO eviction past 500 entries so a long session doesn't leak.
+  debugLog: [],
 };
+
+export const DEBUG_LOG_CAP = 500;
 
 /// Clear device-specific state — call between `disconnect()` and the
 /// next `connect()` so a fresh radio doesn't see stale node/channel
@@ -35,4 +42,14 @@ export function resetDeviceState() {
   state.fwVersion = null;
   state.knownChannels.clear();
   state.knownNodes.clear();
+}
+
+/// Append a structured entry to `state.debugLog`, evicting FIFO past
+/// the cap. Called from events.js for every inbound event and from
+/// chat/settings for user actions worth surfacing.
+export function pushDebug(source, msg, level = 'info') {
+  state.debugLog.push({ at: Date.now(), level, source, msg });
+  if (state.debugLog.length > DEBUG_LOG_CAP) {
+    state.debugLog.splice(0, state.debugLog.length - DEBUG_LOG_CAP);
+  }
 }

@@ -16,6 +16,7 @@ import { log, setStatus } from './ui.js';
 import { handleEvent, setEventHooks } from './events.js';
 import { initChat, onVoice, renderChat, clearThreads, setChatEnabled, renderNodes } from './chat.js';
 import { initSettings, renderSettings, setAudioControlsEnabled } from './settings.js';
+import { initDebug, renderDebug } from './debug.js';
 
 // ---------- DOM refs owned by this module ----------
 
@@ -27,7 +28,7 @@ const infoCard = document.getElementById('info');
 
 // ---------- hash routing ----------
 
-const ROUTES = ['connect', 'chat', 'settings', 'map'];
+const ROUTES = ['connect', 'chat', 'settings', 'map', 'debug'];
 function route() {
   const m = location.hash.match(/^#\/([a-z]+)/);
   const r = m && ROUTES.includes(m[1]) ? m[1] : 'connect';
@@ -46,6 +47,7 @@ route();
 // snapshot may have changed in the background.
 window.addEventListener('hashchange', () => {
   if (location.hash.startsWith('#/settings')) renderSettings();
+  if (location.hash.startsWith('#/debug')) renderDebug();
 });
 
 // ---------- appearance / theme picker ----------
@@ -125,6 +127,7 @@ setEventHooks({
 
 initChat();
 initSettings();
+initDebug();
 
 // ---------- bootstrap ----------
 

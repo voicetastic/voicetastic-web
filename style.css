@@ -242,6 +242,19 @@ input[type='text']:focus, select:focus { outline: none; border-color: var(--acce
 }
 .nodes-list dl.node-detail dt { color: var(--text-muted); }
 .nodes-list dl.node-detail dd { margin: 0; }
+
+.debug-list {
+  max-height: 60vh; overflow-y: auto;
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.5rem 0.6rem;
+  font-family: ui-monospace, monospace; font-size: 0.85rem;
+}
+.debug-line { padding: 0.05rem 0; word-break: break-word; }
+.debug-line .ts { color: var(--text-muted); margin-right: 0.4rem; }
+.debug-line .src { color: var(--text-muted); margin-right: 0.4rem; }
+.debug-line.debug-warn { color: var(--warn); }
+.debug-line.debug-error { color: var(--danger); }
 .voice-player { display: inline-flex; align-items: center; gap: 0.5rem; }
 .voice-player::before { content: '🎙️'; }
 .voice-play {
