@@ -23,7 +23,7 @@ crate-type = ["cdylib", "rlib"]
 #   voicetastic-core = { path = "../voicetastic-desktop/crates/voicetastic-core",
 #                        default-features = false,
 #                        features = ["codec2", "denoise", "opus-wasm", "amrnb-wasm"] }
-voicetastic-core = { git = "https://github.com/voicetastic/voicetastic-core.git", rev = "612e47b56f4dc87c30f881526ebaef8dcba4ea67", default-features = false, features = ["codec2", "denoise", "opus-wasm", "amrnb-wasm"] }
+voicetastic-core = { git = "https://github.com/voicetastic/voicetastic-core.git", rev = "75a6fa7dd058b60e01506b718442412cc898e3bb", default-features = false, features = ["codec2", "denoise", "opus-wasm", "amrnb-wasm"] }
 
 # Same prost as core (0.14) so the generated `proto` types share one trait impl.
 prost = "0.14"
@@ -62,4 +62,17 @@ features = [
   "ReadableStreamReadResult",
   "WritableStream",
   "WritableStreamDefaultWriter",
+  # Web Bluetooth API — Chromium-only today (Chrome, Edge, Opera).
+  # Firefox + Safari users get the Web Serial path; the Connect page
+  # surfaces both buttons but disables BLE when `navigator.bluetooth`
+  # is missing.
+  "Bluetooth",
+  "BluetoothDevice",
+  "BluetoothRemoteGattServer",
+  "BluetoothRemoteGattService",
+  "BluetoothRemoteGattCharacteristic",
+  "RequestDeviceOptions",
+  "BluetoothLeScanFilterInit",
+  "Event",
+  "EventTarget",
 ]

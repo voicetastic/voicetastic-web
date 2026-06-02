@@ -7,8 +7,9 @@
 // wires its change handlers to the wasm setters.
 
 import { state } from './state.js';
-import { log } from './ui.js';
+import { log, updateInfoCard } from './ui.js';
 import { waitForApplyConfirm } from './events.js';
+import { renderChat } from './chat.js';
 
 // ---------- enum tables ----------
 //
@@ -115,6 +116,21 @@ const SECTIONS = [
     { name: 'enabled', label: 'Enabled', type: 'bool' },
     { name: 'mode', label: 'Pairing mode', type: 'enum', options: BT_MODES },
     { name: 'fixed_pin', label: 'Fixed PIN', type: 'int' },
+  ]},
+  { key: 'mqtt', title: '☁ MQTT gateway', writeFn: 'writeMqttConfig', fields: [
+    { name: 'enabled', label: 'Enabled', type: 'bool' },
+    { name: 'address', label: 'Server address', type: 'text' },
+    { name: 'username', label: 'Username', type: 'text' },
+    { name: 'password', label: 'Password', type: 'text' },
+    { name: 'root', label: 'Root topic', type: 'text' },
+    { name: 'encryption_enabled', label: 'Send encrypted packets', type: 'bool' },
+    { name: 'json_enabled', label: 'JSON packets', type: 'bool' },
+    { name: 'tls_enabled', label: 'Use TLS', type: 'bool' },
+    { name: 'proxy_to_client_enabled', label: 'Proxy through client', type: 'bool' },
+    { name: 'map_reporting_enabled', label: 'Report node to public map', type: 'bool' },
+    { name: 'map_publish_interval_secs', label: 'Map publish interval (s)', type: 'int' },
+    { name: 'map_position_precision', label: 'Map position precision (bits)', type: 'int' },
+    { name: 'map_should_report_location', label: 'Opt-in: report location', type: 'bool' },
   ]},
 ];
 
@@ -275,6 +291,14 @@ function renderFixedCoordsBox(current) {
   setBtn.type = 'button';
   setBtn.textContent = 'Set coordinates';
   actions.append(setBtn);
+  // Companion button: emit the same lat/lon/alt as a one-shot mesh
+  // packet on POSITION_APP, distinct from setFixedPosition above
+  // (which writes config-side only and doesn't broadcast).
+  const broadcastBtn = document.createElement('button');
+  broadcastBtn.className = 'ghost';
+  broadcastBtn.type = 'button';
+  broadcastBtn.textContent = 'Broadcast now';
+  actions.append(broadcastBtn);
   box.append(actions);
 
   setBtn.onclick = async (e) => {
@@ -313,6 +337,36 @@ function renderFixedCoordsBox(current) {
       log(`❌ set coordinates: ${err}`);
       setBtn.textContent = '✗ Failed';
       setTimeout(() => { setBtn.textContent = prev; setBtn.disabled = false; }, 2000);
+    }
+  };
+
+  broadcastBtn.onclick = async (e) => {
+    e.stopPropagation();
+    const lat = parseFloat(latInput.value);
+    const lon = parseFloat(lonInput.value);
+    const alt = parseInt(altInput.value || '0', 10);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      log('❌ enter latitude and longitude in decimal degrees first');
+      return;
+    }
+    const dto = {
+      latitude_i: Math.round(lat * 1e7),
+      longitude_i: Math.round(lon * 1e7),
+      altitude: Number.isFinite(alt) ? alt : 0,
+    };
+    const prev = broadcastBtn.textContent;
+    broadcastBtn.disabled = true;
+    broadcastBtn.textContent = 'Broadcasting…';
+    try {
+      // channel 0 + no `to` = broadcast on the primary channel.
+      const id = await state.client.broadcastPosition(dto, 0, undefined);
+      log(`  ⟶ broadcast position ${lat.toFixed(7)}, ${lon.toFixed(7)} @ ${dto.altitude} m (id=${id})`);
+      broadcastBtn.textContent = '✓ Sent';
+    } catch (err) {
+      log(`❌ broadcast position: ${err}`);
+      broadcastBtn.textContent = '✗ Failed';
+    } finally {
+      setTimeout(() => { broadcastBtn.textContent = prev; broadcastBtn.disabled = false; }, 1800);
     }
   };
 
@@ -400,7 +454,8 @@ function renderOneChannel(ch) {
 
 let settingsCardsEl, settingsRefreshBtn, settingsHintEl;
 let denoiseEl, sendCodecEl, codecModeEl, amrnbModeEl, opusKbpsEl;
-let fecModeEl, nackModeEl;
+let fecModeEl, nackModeEl, partialPlayEl;
+let actionRebootBtn, actionResetNodedbBtn, actionFactoryResetBtn;
 
 /// Wire up DOM refs + Audio category change handlers. Called once at
 /// startup by app.js.
@@ -420,6 +475,7 @@ export function initSettings() {
   opusKbpsEl = document.getElementById('opus-kbps');
   fecModeEl = document.getElementById('fec-mode');
   nackModeEl = document.getElementById('nack-mode');
+  partialPlayEl = document.getElementById('partial-play');
 
   denoiseEl.onchange = () => {
     if (!state.client) return;
@@ -460,6 +516,59 @@ export function initSettings() {
     state.client.setNackMode(nackModeEl.value);
     log(`NACK policy set to ${nackModeEl.options[nackModeEl.selectedIndex].text}`);
   };
+  partialPlayEl.onchange = () => {
+    if (!state.client) return;
+    state.client.setPartialPlayOnTimeout(partialPlayEl.checked);
+    log(`partial play on timeout ${partialPlayEl.checked ? 'on' : 'off'}`);
+  };
+
+  actionRebootBtn = document.getElementById('action-reboot');
+  actionResetNodedbBtn = document.getElementById('action-reset-nodedb');
+  actionFactoryResetBtn = document.getElementById('action-factory-reset');
+
+  actionRebootBtn.onclick = () => runDeviceAction(
+    actionRebootBtn,
+    'Reboot',
+    () => state.client.reboot(5),
+    'Reboot in 5s? The radio will go offline briefly.',
+  );
+  actionResetNodedbBtn.onclick = () => runDeviceAction(
+    actionResetNodedbBtn,
+    'Reset NodeDB',
+    async () => {
+      await state.client.resetNodedb();
+      // Wasm cleared its ProtocolState.nodes; mirror in JS so the chat
+      // thread list + info card don't keep showing wiped peers.
+      state.knownNodes.clear();
+      updateInfoCard();
+      renderChat();
+    },
+    'Wipe the radio’s NodeDB (all learned peers) and re-pull config?',
+  );
+  actionFactoryResetBtn.onclick = () => runDeviceAction(
+    actionFactoryResetBtn,
+    'Factory reset',
+    () => state.client.factoryReset(),
+    'Factory-reset the radio? Owner, channels, and module configs will be wiped.',
+  );
+}
+
+async function runDeviceAction(btn, label, fn, confirmMsg) {
+  if (!state.client) return;
+  if (!window.confirm(confirmMsg)) return;
+  const prev = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = `${label}…`;
+  try {
+    await fn();
+    log(`${label} command sent`);
+    btn.textContent = `${label} ✓`;
+  } catch (e) {
+    log(`${label} failed: ${e}`);
+    btn.textContent = `${label} ✗`;
+  } finally {
+    setTimeout(() => { btn.textContent = prev; btn.disabled = !state.client; }, 1800);
+  }
 }
 
 /// Show only the mode/bitrate dropdown for the currently-selected send
@@ -481,7 +590,11 @@ export function setAudioControlsEnabled(on) {
   opusKbpsEl.disabled = !on;
   fecModeEl.disabled = !on;
   nackModeEl.disabled = !on;
+  partialPlayEl.disabled = !on;
   settingsRefreshBtn.disabled = !on;
+  actionRebootBtn.disabled = !on;
+  actionResetNodedbBtn.disabled = !on;
+  actionFactoryResetBtn.disabled = !on;
   if (on) refreshCodecRows();
 }
 

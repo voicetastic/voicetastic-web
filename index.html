@@ -5,6 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <link rel="stylesheet" href="./style.css" />
+    <!-- Leaflet for the /map page. CDN with SRI so a compromised CDN
+         can't ship arbitrary JS. The page works fine offline once the
+         browser has cached both files. -->
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin="anonymous" />
+    <script
+      defer
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin="anonymous"></script>
     <title>Voicetastic Web</title>
   </head>
   <body>
@@ -30,6 +43,7 @@
           <li><a href="#/chat" data-route="chat">Chat</a></li>
           <li><a href="#/settings" data-route="settings">Settings</a></li>
           <li><a href="#/map" data-route="map">Map</a></li>
+          <li><a href="#/debug" data-route="debug">Debug</a></li>
           <li class="nav-sep" aria-hidden="true"></li>
           <li>
             <a
@@ -52,17 +66,21 @@
       <section id="page-connect" class="page">
         <h1>Connect your radio</h1>
         <p class="lead">
-          Plug in a Meshtastic radio over USB. Text and voice both run
+          Plug in a Meshtastic radio over USB <em>or</em> pair via
+          Bluetooth. Text and voice both run
           <code>voicetastic-core</code>'s protocol core in the browser — Codec2 (pure
-          Rust) for voice, RNNoise for capture-side denoise. Chrome/Edge or
-          Firefox&nbsp;151+ over <code>localhost</code> or HTTPS; voice also needs
-          mic permission.
+          Rust) for voice, RNNoise for capture-side denoise. Web Serial:
+          Chrome/Edge or Firefox&nbsp;151+. Web Bluetooth:
+          Chromium-only (Chrome / Edge / Opera). Either path needs
+          <code>localhost</code> or HTTPS; voice also needs mic permission.
         </p>
         <div class="row">
-          <button id="connect">Connect</button>
+          <button id="connect">Connect (USB)</button>
+          <button id="connect-ble" class="ghost">Connect (Bluetooth)</button>
           <button id="disconnect" class="ghost" hidden>Disconnect</button>
+          <button id="forget" class="ghost" hidden title="Disconnect AND revoke this site's permission to talk to the device. Useful when swapping radios — the device picker will re-prompt next time.">Forget device</button>
           <button id="discover" class="ghost" hidden disabled>🔍 Scan for nodes</button>
-          <span id="connect-hint" class="muted">Click Connect, then pick the serial port.</span>
+          <span id="connect-hint" class="muted">Pick a transport above, then approve the device in the browser prompt.</span>
         </div>
         <div id="info" class="card" hidden>
           <h3>Device</h3>
@@ -79,6 +97,15 @@
           or a node for direct messages. Threads are populated as the radio reports
           channels and node info.
         </p>
+        <details id="nodes-card" class="setcard" style="margin-bottom:1rem;">
+          <summary>
+            <h3>📡 Nodes <span id="nodes-count" class="muted">(0)</span></h3>
+            <span class="hint">peers the radio currently knows about</span>
+          </summary>
+          <div id="nodes-list" class="nodes-list">
+            <div class="placeholder muted">Connect a radio to load the node list.</div>
+          </div>
+        </details>
         <div class="chat-shell">
           <div class="chat-header">
             <label for="chat-thread">Thread:</label>
@@ -117,6 +144,22 @@
           <button id="settings-refresh" disabled>Refresh from device</button>
           <span id="settings-hint" class="muted">Connect a radio to load settings.</span>
         </div>
+
+        <h2 class="category">Appearance</h2>
+        <details class="setcard" open>
+          <summary>
+            <h3>🎨 Appearance</h3>
+            <span class="hint">client-side theme (saved per browser)</span>
+          </summary>
+          <div class="fields">
+            <label for="theme-picker">Theme</label>
+            <select id="theme-picker">
+              <option value="system" selected>System (follow OS)</option>
+              <option value="dark">Dark</option>
+              <option value="light">Light</option>
+            </select>
+          </div>
+        </details>
 
         <h2 class="category">Meshtastic</h2>
         <div id="settings-cards"></div>
@@ -191,6 +234,16 @@
               <option value="conservative">Conservative — long quiet windows, slow round growth</option>
               <option value="aggressive">Aggressive — short windows, many rounds</option>
             </select>
+
+            <label for="partial-play">Play partial voice on timeout</label>
+            <div>
+              <input id="partial-play" type="checkbox" checked disabled />
+              <span class="muted" style="font-size:0.8rem;">
+                If the reassembly timer fires before all chunks arrive, play
+                what was received (missing data is filled with silence)
+                instead of dropping the message.
+              </span>
+            </div>
             <div class="muted" style="font-size:0.8rem;">
               Broadcast traffic is always treated as <code>Off</code> regardless
               — the assembler short-circuits broadcast NACK emission.
@@ -203,15 +256,91 @@
             </div>
           </div>
         </details>
+
+        <h2 class="category">Device actions</h2>
+        <details class="setcard">
+          <summary>
+            <h3>⚠ Device actions</h3>
+            <span class="hint">reboot, reset NodeDB, factory reset</span>
+          </summary>
+          <div class="fields" style="grid-template-columns: 1fr;">
+            <button id="action-reboot" disabled>Reboot device (5s)</button>
+            <button id="action-reset-nodedb" disabled>Reset NodeDB (then refresh)</button>
+            <button id="action-factory-reset" class="danger" disabled>Factory reset</button>
+            <div class="muted" style="font-size:0.8rem;">
+              Sent as admin messages to the connected radio. Factory reset wipes
+              owner, channels, and module configs; Reset NodeDB only clears
+              learned peer entries and re-pulls the config burst so the local
+              snapshot reflects the wipe.
+            </div>
+          </div>
+        </details>
+
+        <details class="setcard">
+          <summary>
+            <h3>⬆ Firmware update</h3>
+            <span class="hint">OTA via this client &mdash; coming soon</span>
+          </summary>
+          <div class="fields" style="grid-template-columns: 1fr;">
+            <div>
+              <strong>Installed:</strong>
+              <span id="fw-current" class="muted">—</span>
+            </div>
+            <p style="margin: 0; font-size: 0.9rem;">
+              OTA upload from this browser client is not yet implemented.
+              The transport (XModem-over-AdminMessage) is in the
+              Meshtastic protocol but the upload loop, CRC, retry, and
+              progress reporting are deliberately not wired here to
+              avoid bricking radios mid-transfer.
+            </p>
+            <p class="muted" style="margin: 0; font-size: 0.85rem;">
+              For now, flash via the
+              <a href="https://flasher.meshtastic.org/" target="_blank" rel="noopener">Meshtastic web flasher</a>
+              or <code>meshtastic --update</code> on the CLI.
+            </p>
+          </div>
+        </details>
       </section>
 
       <!-- ================================= MAP ================================= -->
       <section id="page-map" class="page">
         <h1>Map</h1>
         <p class="lead">
-          Mesh map view — known nodes plotted by reported position. Placeholder for now.
+          Mesh map view — known nodes plotted by their last reported
+          position. Tiles from OpenStreetMap. Click a marker for the
+          node's name, last-heard, and battery.
         </p>
-        <div class="map-stub">Map view coming soon.</div>
+        <div id="map" class="map-canvas"></div>
+        <div id="map-hint" class="muted" style="margin-top:0.5rem;font-size:0.85rem;">
+          Connect a radio with peers reporting positions to see pins.
+        </div>
+      </section>
+
+      <!-- ================================= DEBUG ================================ -->
+      <section id="page-debug" class="page">
+        <h1>Debug</h1>
+        <p class="lead">
+          Structured event log captured from inbound radio events and
+          client actions. Useful for diagnosing radio handshakes, voice
+          assembly, and admin writes. Filters and the entries themselves
+          are local to this browser session.
+        </p>
+        <div class="row" style="margin-bottom:1rem;">
+          <label for="debug-source" class="muted" style="font-size:0.85rem;">Source:</label>
+          <select id="debug-source">
+            <option value="">all</option>
+          </select>
+          <label for="debug-level" class="muted" style="font-size:0.85rem;">Level:</label>
+          <select id="debug-level">
+            <option value="">all</option>
+            <option value="info">info</option>
+            <option value="warn">warn</option>
+            <option value="error">error</option>
+          </select>
+          <button id="debug-clear" class="ghost">Clear</button>
+          <span id="debug-count" class="muted" style="margin-left:auto;font-size:0.85rem;">0 entries</span>
+        </div>
+        <div id="debug-list" class="debug-list muted">No events yet.</div>
       </section>
     </main>
 

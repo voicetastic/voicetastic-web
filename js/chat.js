@@ -31,9 +31,11 @@ export function initChat() {
     if (!text || !state.client) return;
     const dest = parseThread(threadEl.value);
     try {
-      await state.client.sendText(text, dest.channel, dest.to);
+      // sendText now resolves with the mesh packet id; pass it through
+      // so the message bubble can show its delivery-status icon.
+      const id = await state.client.sendText(text, dest.channel, dest.to);
       log('  ⟶ sent: ' + text);
-      pushMessage(threadEl.value, threads.get(threadEl.value).label, 'You', text, 'out');
+      pushMessage(threadEl.value, threads.get(threadEl.value).label, 'You', text, 'out', id);
       textEl.value = '';
     } catch (e) { log('❌ send failed: ' + e); }
   };
@@ -94,10 +96,175 @@ export function ensureThread(key, label) {
 }
 
 /// Push a message into a thread + re-render if it's currently selected.
-export function pushMessage(threadKey, threadLabel, who, body, kind) {
+/// `packetId` (optional) is the mesh packet id returned by `sendText`;
+/// when present, outgoing messages start with `status: 'pending'` and
+/// flip to delivered/failed/timed_out via `setMessageStatus` when the
+/// matching `ack_or_nak` event lands.
+export function pushMessage(threadKey, threadLabel, who, body, kind, packetId) {
   ensureThread(threadKey, threadLabel);
-  threads.get(threadKey).messages.push({ who, body, kind });
+  const msg = { who, body, kind };
+  if (typeof packetId === 'number') {
+    msg.packetId = packetId;
+    msg.status = 'pending';
+  }
+  threads.get(threadKey).messages.push(msg);
   if (threadEl.value === threadKey) renderChat();
+}
+
+/// Flip an outgoing message's delivery-status icon. Called from
+/// events.js when an `ack_or_nak` lands. No-op if no message in any
+/// thread has that packet id (e.g. an ack arriving for a message we
+/// sent before the page loaded).
+export function setMessageStatus(packetId, status) {
+  for (const t of threads.values()) {
+    for (const m of t.messages) {
+      if (m.packetId === packetId) {
+        m.status = status;
+        renderChat();
+        return;
+      }
+    }
+  }
+}
+
+/// Currently-expanded node detail row in the Chat-tab Nodes panel.
+/// `null` collapses every row; otherwise the matching `num` row renders
+/// an inline detail block underneath it.
+let expandedNodeNum = null;
+
+/// Re-render the Chat tab's Nodes panel from `client.listNodes()`. Called
+/// on the relevant events (`node_info`, `config_complete`, `disconnect`)
+/// so the list stays in sync without polling.
+export function renderNodes() {
+  const listEl = document.getElementById('nodes-list');
+  const countEl = document.getElementById('nodes-count');
+  if (!listEl) return;
+  if (!state.client) {
+    listEl.innerHTML = '<div class="placeholder muted">Connect a radio to load the node list.</div>';
+    if (countEl) countEl.textContent = '(0)';
+    return;
+  }
+  let rows;
+  try { rows = state.client.listNodes(); }
+  catch (e) {
+    listEl.innerHTML = `<div class="placeholder muted">listNodes failed: ${e}</div>`;
+    return;
+  }
+  if (countEl) countEl.textContent = `(${rows.length})`;
+  if (rows.length === 0) {
+    listEl.innerHTML = '<div class="placeholder muted">No peers heard yet.</div>';
+    return;
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const fmtAge = (lh) => {
+    if (!lh) return '—';
+    const a = Math.max(0, now - lh);
+    if (a < 60) return `${a}s ago`;
+    if (a < 3600) return `${Math.floor(a / 60)}m ago`;
+    if (a < 86400) return `${Math.floor(a / 3600)}h ago`;
+    return `${Math.floor(a / 86400)}d ago`;
+  };
+  const fmtBat = (b) => b == null ? '—' : (b === 101 ? 'AC' : `${b}%`);
+  const fmtUptime = (s) => {
+    if (s == null) return null;
+    const sec = s % 60, m = Math.floor(s / 60) % 60, h = Math.floor(s / 3600) % 24, d = Math.floor(s / 86400);
+    if (d > 0) return `${d}d ${h}h`;
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m ${sec}s`;
+    return `${sec}s`;
+  };
+  const escape = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const hexId = (n) => `!${n.toString(16).padStart(8, '0')}`;
+
+  // Build a min-max-normalised SVG polyline of values inside a 160×24
+  // rect, the same dimensions desktop uses. `nullable` = true skips
+  // null/missing entries (battery is optional per-sample); otherwise
+  // 0s are kept (snr).
+  const sparkline = (values, lo, hi, color, nullable = false) => {
+    const filtered = nullable ? values.filter((v) => v != null) : values;
+    if (filtered.length < 2) return '';
+    const W = 160, H = 24;
+    const n = filtered.length;
+    const span = hi - lo || 1;
+    const pts = filtered.map((v, i) => {
+      const norm = Math.max(0, Math.min(1, (v - lo) / span));
+      const x = (W / (n - 1)) * i;
+      const y = H - norm * H;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(' ');
+    return `<svg class="spark" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">
+      <rect x="0.5" y="0.5" width="${W - 1}" height="${H - 1}" fill="none" stroke="${color}" stroke-opacity="0.25" />
+      <polyline fill="none" stroke="${color}" stroke-width="1.5" points="${pts}"/>
+    </svg>`;
+  };
+
+  const detailRows = (n) => {
+    const lines = [];
+    lines.push(['Node id', `${hexId(n.num)} (${n.num})`]);
+    if (n.long_name) lines.push(['Long name', escape(n.long_name)]);
+    if (n.short_name) lines.push(['Short name', escape(n.short_name)]);
+    lines.push(['HW model', String(n.hw_model)]);
+    lines.push(['Role', String(n.role)]);
+    if (n.is_licensed) lines.push(['HAM', 'yes']);
+    lines.push(['Channel', String(n.channel)]);
+    if (n.last_heard) lines.push(['Last heard', `${fmtAge(n.last_heard)} (${n.last_heard})`]);
+    lines.push(['SNR', `${n.snr.toFixed(1)} dB`]);
+    if (n.latitude_i != null && n.longitude_i != null) {
+      const lat = (n.latitude_i / 1e7).toFixed(5);
+      const lon = (n.longitude_i / 1e7).toFixed(5);
+      lines.push(['Position', `${lat}, ${lon}`]);
+    }
+    if (n.altitude != null) lines.push(['Altitude', `${n.altitude} m`]);
+    if (n.battery_level != null) lines.push(['Battery', fmtBat(n.battery_level)]);
+    if (n.voltage != null) lines.push(['Voltage', `${n.voltage.toFixed(2)} V`]);
+    if (n.channel_utilization != null) lines.push(['Ch util', `${n.channel_utilization.toFixed(1)}%`]);
+    if (n.air_util_tx != null) lines.push(['Air util TX', `${n.air_util_tx.toFixed(1)}%`]);
+    const up = fmtUptime(n.uptime_seconds);
+    if (up) lines.push(['Uptime', up]);
+    if (n.via_mqtt) lines.push(['Via MQTT', 'yes']);
+    if (n.is_favorite) lines.push(['Favorite', 'yes']);
+    // Telemetry sparklines, surfaced only when ≥ 2 samples have
+    // landed for this peer (battery 0–100, SNR scaled to typical
+    // mesh range of −20 dB..+20 dB).
+    const samples = state.nodeHistory.get(n.num) || [];
+    if (samples.length >= 2) {
+      const batt = samples.map((s) => s.battery);
+      const snr = samples.map((s) => s.snr);
+      const battSvg = sparkline(batt, 0, 100, '#78c878', true);
+      const snrSvg = sparkline(snr, -20, 20, '#78a0dc');
+      if (battSvg) lines.push(['Battery trend', battSvg]);
+      if (snrSvg) lines.push(['SNR trend', snrSvg]);
+    }
+    return lines.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+  };
+
+  const tbody = rows.map((n) => {
+    const display = n.long_name || n.short_name || hexId(n.num);
+    const isOpen = expandedNodeNum === n.num;
+    const summaryRow = `<tr data-num="${n.num}" class="node-row${isOpen ? ' open' : ''}">
+      <td>${isOpen ? '▾' : '▸'} ${escape(display)}</td>
+      <td>${fmtAge(n.last_heard)}</td>
+      <td>${n.snr.toFixed(1)} dB</td>
+      <td>${fmtBat(n.battery_level)}</td>
+      <td class="id">${hexId(n.num)}</td>
+    </tr>`;
+    if (!isOpen) return summaryRow;
+    return summaryRow + `<tr class="node-detail-row"><td colspan="5"><dl class="node-detail">${detailRows(n)}</dl></td></tr>`;
+  }).join('');
+  listEl.innerHTML = `<table>
+    <thead><tr><th>Node</th><th>Last heard</th><th>SNR</th><th>Battery</th><th>ID</th></tr></thead>
+    <tbody>${tbody}</tbody>
+  </table>`;
+
+  // Wire click handlers per row (no event-delegation gymnastics; we
+  // re-render on every node_info anyway so the live list isn't large).
+  for (const tr of listEl.querySelectorAll('tr.node-row')) {
+    tr.addEventListener('click', () => {
+      const num = parseInt(tr.dataset.num, 10);
+      expandedNodeNum = (expandedNodeNum === num) ? null : num;
+      renderNodes();
+    });
+  }
 }
 
 /// Render the currently-selected thread into the messages pane.
@@ -134,6 +301,21 @@ export function renderChat() {
     } else {
       const body = document.createElement('span'); body.className = 'body'; body.textContent = m.body;
       row.appendChild(body);
+    }
+    if (m.status) {
+      const status = document.createElement('span');
+      status.className = 'msg-status';
+      const map = {
+        pending:   { icon: '⏳', hover: 'Waiting for delivery ack' },
+        delivered: { icon: '✓',  hover: 'Delivered' },
+        failed:    { icon: '❌', hover: 'Delivery failed' },
+        timed_out: { icon: '⏱', hover: 'No ack within timeout; may still be in flight' },
+        cancelled: { icon: '⊘', hover: 'Cancelled' },
+      };
+      const view = map[m.status] || { icon: '?', hover: m.status };
+      status.textContent = view.icon;
+      status.title = view.hover;
+      row.appendChild(status);
     }
     chatEl.appendChild(row);
   }

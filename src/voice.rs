@@ -229,6 +229,18 @@ impl WebClient {
         self.inner.denoise_enabled.set(enabled);
     }
 
+    /// Toggle the receive-side partial-play-on-timeout policy. When true
+    /// (the default), an incomplete inbound message whose reassembly timer
+    /// fires is finalised with whatever chunks arrived (silence padded);
+    /// when false, the partial is dropped. Pushed into the running
+    /// `VoiceAssembler` via `update_config` — no reconnect needed.
+    #[wasm_bindgen(js_name = setPartialPlayOnTimeout)]
+    pub fn set_partial_play_on_timeout(&self, enabled: bool) {
+        let _ = self.inner.assembler.update_config(|cfg| {
+            cfg.partial_play_on_timeout = enabled;
+        });
+    }
+
     /// Set the Codec2 mode (0..=5; 0 = 3200 bps, 5 = 1200 bps). Takes effect
     /// on the next `sendVoice`. Out-of-range values are clamped.
     #[wasm_bindgen(js_name = setCodec2Mode)]
@@ -546,12 +558,48 @@ fn voice_dest_to_u32(dest: &voicetastic_core::voice::VoiceDestination) -> u32 {
 /// reliability: the framing + retry-round bookkeeping lives in core, this
 /// loop just does the timer and the writes. Exits when only this task holds
 /// `inner` (the `WebClient` handle and the read loop have both dropped).
+///
+/// Also drives the inbound idle-probe. The radio's RF state machine can
+/// park after a long string of MaxRetransmit failures: the host write
+/// pipe stays alive (text messages still send) but no inbound frames
+/// arrive. Mirrors `crates/voicetastic-core/src/meshtastic/service/mod.rs`'s
+/// `silent_probes` loop — after `IDLE_PROBE` of inbound silence we send
+/// a `WantConfigId` to nudge the firmware. A second silent probe surfaces
+/// a warning so the user can see that the radio is unresponsive (the
+/// browser can't force-close the port the way the native driver can).
 pub(crate) async fn nack_tick_loop(inner: Rc<Inner>) {
     const TICK_MS: i32 = 500;
+    const IDLE_PROBE: std::time::Duration = std::time::Duration::from_secs(60);
     loop {
         sleep_ms(TICK_MS).await;
         if Rc::strong_count(&inner) <= 1 {
             return;
+        }
+        // Idle-probe: if no inbound frame has landed in IDLE_PROBE, send a
+        // WantConfigId to wake a parked radio. Read_loop resets
+        // `last_inbound_at` on every successful decode, so the timer here
+        // measures true silence, not just no-voice. `silent_probes` only
+        // grows in this branch; read_loop zeroes it on any inbound frame.
+        let quiet = web_time::Instant::now().duration_since(inner.last_inbound_at.get());
+        if quiet >= IDLE_PROBE {
+            let probes = inner.silent_probes.get().saturating_add(1);
+            inner.silent_probes.set(probes);
+            let nonce = crate::util::rand_u32();
+            if let Err(e) = inner.write_payload(protocol::want_config(nonce)).await {
+                log(&format!("idle probe send failed: {e:?}"));
+            } else {
+                log(&format!(
+                    "idle probe: no inbound for {}s, sent WantConfigId nonce={nonce} (probe {probes})",
+                    quiet.as_secs(),
+                ));
+            }
+            // Step the timer forward by one window so we don't re-probe on
+            // every tick while still silent — wait another full IDLE_PROBE
+            // before the next attempt.
+            inner.last_inbound_at.set(web_time::Instant::now());
+            if probes >= 2 {
+                log("⚠️ idle probe: no inbound for ~120 s despite probes — radio may be unresponsive; try Disconnect+Connect or power-cycle the radio");
+            }
         }
         // Opportunistic GC of the outgoing-voice registry. Each `send_voice`
         // registers an entry so NACKs can drive retransmits; without periodic

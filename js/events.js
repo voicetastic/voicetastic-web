@@ -11,9 +11,9 @@
 // after an admin write. Each pending key resolves on the next matching
 // event or rejects via timeout.
 
-import { state } from './state.js';
+import { state, pushDebug, pushNodeSample } from './state.js';
 import { log, nodeAddr, setStatus, updateInfoCard } from './ui.js';
-import { ensureThread, routeIncoming } from './chat.js';
+import { ensureThread, routeIncoming, setMessageStatus, renderNodes } from './chat.js';
 
 // ---------- callbacks owned by app.js ----------
 //
@@ -56,6 +56,9 @@ function fireApplyConfirm(key) {
 /// Dispatch one structured event from the wasm driver.
 export function handleEvent(ev) {
   log('  ⟵ ' + ev.text);
+  // Every inbound event is also recorded into the structured debug
+  // log under a per-type source so the Debug tab can filter on it.
+  pushDebug(ev.type || 'event', ev.text || JSON.stringify(ev));
   switch (ev.type) {
     case 'my_info': {
       state.myNodeNum = ev.node_num;
@@ -80,12 +83,22 @@ export function handleEvent(ev) {
       const name = ev.long_name || hex;
       state.knownNodes.set(hex, name);
       if (hex !== state.myNodeHex) ensureThread(`node:${hex}`, `DM — ${name} (${hex})`);
+      // Telemetry sample for the sparkline panel. battery_level is
+      // optional on the event (only present when the radio reported
+      // device_metrics); snr is always set (may be 0.0).
+      pushNodeSample(
+        ev.node_num,
+        typeof ev.battery_level === 'number' ? ev.battery_level : null,
+        typeof ev.snr === 'number' ? ev.snr : 0,
+      );
       updateInfoCard();
+      renderNodes();
       break;
     }
     case 'config_complete': {
       setStatus('Ready', 'ready');
       hooks.onConfigComplete?.();
+      renderNodes();
       break;
     }
     case 'incoming_text': {
@@ -99,6 +112,13 @@ export function handleEvent(ev) {
     case 'owner':
       fireApplyConfirm('owner');
       break;
+    case 'ack_or_nak': {
+      // wasm side emits status as 'delivered' / 'failed' / 'timed_out' /
+      // 'cancelled' (events.rs::AckOrNak). Pass straight through to the
+      // chat module's message-status map.
+      setMessageStatus(ev.request_id, ev.status);
+      break;
+    }
     // 'log', 'queue_status', 'incoming_data' — log only.
     default:
       break;

@@ -10,24 +10,28 @@
 //   settings.js  — Settings page (Meshtastic + Audio)
 //   app.js       — this file: bootstrap, routing, connect lifecycle
 
-import init, { connect } from '../pkg/voicetastic_web.js';
+import init, { connect, connectBle } from '../pkg/voicetastic_web.js';
 import { state, resetDeviceState } from './state.js';
 import { log, setStatus } from './ui.js';
 import { handleEvent, setEventHooks } from './events.js';
-import { initChat, onVoice, renderChat, clearThreads, setChatEnabled } from './chat.js';
+import { initChat, onVoice, renderChat, clearThreads, setChatEnabled, renderNodes } from './chat.js';
 import { initSettings, renderSettings, setAudioControlsEnabled } from './settings.js';
+import { initDebug, renderDebug } from './debug.js';
+import { renderMap } from './map.js';
 
 // ---------- DOM refs owned by this module ----------
 
 const connectBtn = document.getElementById('connect');
+const connectBleBtn = document.getElementById('connect-ble');
 const disconnectBtn = document.getElementById('disconnect');
+const forgetBtn = document.getElementById('forget');
 const discoverBtn = document.getElementById('discover');
 const connectHint = document.getElementById('connect-hint');
 const infoCard = document.getElementById('info');
 
 // ---------- hash routing ----------
 
-const ROUTES = ['connect', 'chat', 'settings', 'map'];
+const ROUTES = ['connect', 'chat', 'settings', 'map', 'debug'];
 function route() {
   const m = location.hash.match(/^#\/([a-z]+)/);
   const r = m && ROUTES.includes(m[1]) ? m[1] : 'connect';
@@ -46,6 +50,44 @@ route();
 // snapshot may have changed in the background.
 window.addEventListener('hashchange', () => {
   if (location.hash.startsWith('#/settings')) renderSettings();
+  if (location.hash.startsWith('#/debug')) renderDebug();
+  // Leaflet needs a sized container; calling renderMap on the
+  // hashchange (rather than at startup) means the /map section is
+  // already display:block by the time the layer initialises.
+  if (location.hash.startsWith('#/map')) renderMap();
+});
+
+// ---------- appearance / theme picker ----------
+//
+// Theme preference lives in localStorage as `voicetastic-theme` ∈
+// {system, dark, light}. `system` follows the OS via prefers-color-scheme.
+// Anything else pins the `data-theme` attribute on <html>. Settings page
+// has the picker; here we apply the saved preference at startup and
+// listen for OS theme changes when in `system` mode.
+
+const themePicker = document.getElementById('theme-picker');
+const themeMql = window.matchMedia('(prefers-color-scheme: light)');
+
+function applyTheme(pref) {
+  const root = document.documentElement;
+  const resolved = pref === 'system' ? (themeMql.matches ? 'light' : 'dark') : pref;
+  if (resolved === 'dark') root.removeAttribute('data-theme');
+  else root.setAttribute('data-theme', resolved);
+}
+
+const savedTheme = localStorage.getItem('voicetastic-theme') || 'system';
+if (themePicker) themePicker.value = savedTheme;
+applyTheme(savedTheme);
+
+themePicker?.addEventListener('change', () => {
+  const pref = themePicker.value;
+  localStorage.setItem('voicetastic-theme', pref);
+  applyTheme(pref);
+});
+
+themeMql.addEventListener('change', () => {
+  const pref = localStorage.getItem('voicetastic-theme') || 'system';
+  if (pref === 'system') applyTheme('system');
 });
 
 // ---------- mobile nav hamburger ----------
@@ -75,7 +117,18 @@ function setConnectedUi(on) {
   if (!on) discoverBtn.disabled = true; // re-enabled at next ConfigComplete
   connectBtn.hidden = on;
   connectBtn.disabled = on;
+  connectBleBtn.hidden = on;
+  connectBleBtn.disabled = on;
   disconnectBtn.hidden = !on;
+  // Forget is only meaningful for BLE connections — it revokes the
+  // site's BLE permission for the active device. We only flip it
+  // visible while connected; the BLE-vs-Serial discriminant lives on
+  // `state.transport` (set by the connect handlers below).
+  forgetBtn.hidden = !on || state.transport !== 'ble';
+}
+
+function hasWebBluetooth() {
+  return typeof navigator !== 'undefined' && 'bluetooth' in navigator;
 }
 
 // events.js doesn't know about settings or the connect-page UI; let it
@@ -92,62 +145,114 @@ setEventHooks({
 
 initChat();
 initSettings();
+initDebug();
 
 // ---------- bootstrap ----------
 
-if (!('serial' in navigator)) {
-  log('Web Serial unavailable. Use Chrome/Edge or Firefox 151+ over localhost/HTTPS.');
-  connectBtn.disabled = true;
-  setStatus('Unsupported', 'error');
-} else {
+// We leave both buttons clickable even when the corresponding API
+// isn't visible to JS. The browser hides `navigator.serial` and
+// `navigator.bluetooth` entirely on insecure origins (HTTP that
+// isn't `localhost`), so a "greyed out" button looks like a bug
+// to the user when really the page just needs HTTPS. Letting the
+// click through and surfacing the underlying error ("Web Bluetooth
+// not available — use Chrome/Edge/Opera over localhost or HTTPS")
+// is more honest. The wasm side returns a clear message in both
+// the "wrong browser" and "wrong context" cases.
+const hasSerial = 'serial' in navigator;
+const hasBle = hasWebBluetooth();
+{
+  // Tooltips give the user a hint before they click; the click
+  // itself never silently fails because the wasm helper rejects
+  // with the same explanation.
+  if (!hasSerial) {
+    connectBtn.title =
+      'Web Serial needs a Chromium browser or Firefox 151+, served over HTTPS or localhost.';
+  }
+  if (!hasBle) {
+    connectBleBtn.title =
+      'Web Bluetooth needs a Chromium browser (Chrome / Edge / Opera), served over HTTPS or localhost.';
+  }
   await init();
   log('WASM loaded. Ready to connect.');
 
+  /// Shared post-connect bookkeeping for both Serial and BLE paths.
+  /// `transport` records which path was used so the Forget button
+  /// (BLE-only) can be shown selectively.
+  const onClientConnected = (client, transport) => {
+    state.client = client;
+    state.transport = transport;
+    log('Connected. Config handshake in flight…');
+    setStatus('Connected', 'connecting');
+    connectHint.textContent = 'Connected — waiting for ConfigComplete…';
+    setConnectedUi(true);
+    renderChat();
+  };
+
   connectBtn.onclick = async () => {
     connectBtn.disabled = true;
+    connectBleBtn.disabled = true;
     setStatus('Connecting…', 'connecting');
     connectHint.textContent = 'Pick a serial port in the browser prompt…';
     log('Requesting port…');
     try {
-      state.client = await connect(handleEvent, onVoice);
-      log('Connected. Config handshake in flight…');
-      setStatus('Connected', 'connecting');
-      connectHint.textContent = 'Connected — waiting for ConfigComplete…';
-      setConnectedUi(true);
-      renderChat(); // refresh placeholder text
+      onClientConnected(await connect(handleEvent, onVoice), 'serial');
     } catch (e) {
       log('❌ ' + e);
       setStatus('Disconnected');
       connectBtn.disabled = false;
-      connectHint.textContent = 'Click Connect, then pick the serial port.';
+      connectBleBtn.disabled = false;
+      connectHint.textContent = 'Pick a transport above, then approve the device in the browser prompt.';
     }
   };
 
-  disconnectBtn.onclick = async () => {
+  connectBleBtn.onclick = async () => {
+    connectBtn.disabled = true;
+    connectBleBtn.disabled = true;
+    setStatus('Connecting…', 'connecting');
+    connectHint.textContent = 'Pick a Meshtastic device in the Bluetooth prompt…';
+    log('Requesting BLE device…');
+    try {
+      onClientConnected(await connectBle(handleEvent, onVoice), 'ble');
+    } catch (e) {
+      log('❌ ' + e);
+      setStatus('Disconnected');
+      connectBtn.disabled = false;
+      connectBleBtn.disabled = false;
+      connectHint.textContent = 'Pick a transport above, then approve the device in the browser prompt.';
+    }
+  };
+
+  /// Shared teardown for `disconnect()` and `forget()` — both consume
+  /// the WebClient on the Rust side, so the JS-side state must be
+  /// cleared before the await to avoid a freed-proxy call in flight.
+  const teardownClient = async (action, label) => {
     if (!state.client) return;
-    // Tear down the JS-side state up front, before the awaited
-    // disconnect — `disconnect()` consumes the WebClient on the Rust
-    // side, so any sendText/sendVoice that lands between the await
-    // resolving and the UI-gate update would hit a freed proxy.
     const client = state.client;
     state.client = null;
     disconnectBtn.disabled = true;
+    forgetBtn.disabled = true;
     setConnectedUi(false);
-    log('Disconnecting…');
+    log(`${label}…`);
     try {
-      await client.disconnect();
-      log('Disconnected.');
+      await action(client);
+      log(`${label} done.`);
     } catch (e) {
-      log('disconnect: ' + e);
+      log(`${label}: ${e}`);
     }
     disconnectBtn.disabled = false;
+    forgetBtn.disabled = false;
     setStatus('Disconnected');
-    connectHint.textContent = 'Click Connect, then pick the serial port.';
+    connectHint.textContent = 'Click Connect, then pick the serial port or Bluetooth device.';
     resetDeviceState();
     infoCard.hidden = true;
     clearThreads();
     renderSettings();
+    renderNodes();
   };
+
+  disconnectBtn.onclick = () => teardownClient((c) => c.disconnect(), 'Disconnecting');
+
+  forgetBtn.onclick = () => teardownClient((c) => c.forget(), 'Forgetting BLE device');
 
   discoverBtn.onclick = async () => {
     if (!state.client) return;
