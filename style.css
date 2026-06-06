@@ -66,8 +66,26 @@ code { background: var(--bg-card); padding: 0.05rem 0.35rem; border-radius: 4px;
   color: var(--text); font-weight: 700; font-size: 1.3125rem;
 }
 .brand:hover { text-decoration: none; }
-.brand-mark { width: 2.1875rem; height: 2.1875rem; border-radius: 6px; display: block; }
-.brand-tag { font-weight: 500; font-size: 0.85rem; color: var(--text-muted); margin-left: 0.25rem; }
+/* Connection-state ring on the logo, mirroring the Android top app bar:
+   green when ready, amber + pulse while connecting, red when down. */
+.brand-mark {
+  width: 2.1875rem; height: 2.1875rem; border-radius: 6px; display: block;
+  box-shadow: 0 0 0 2px transparent;
+  transition: box-shadow 0.2s ease;
+}
+.brand.is-connected .brand-mark { box-shadow: 0 0 0 2px var(--ok); }
+.brand.is-disconnected .brand-mark { box-shadow: 0 0 0 2px var(--danger); }
+.brand.is-connecting .brand-mark {
+  box-shadow: 0 0 0 2px var(--warn);
+  animation: brand-pulse 1.5s ease-in-out infinite;
+}
+@keyframes brand-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+/* Brand text stacks: app name / tagline when idle, node name / id when
+   connected. Tight line-height keeps the two lines compact in the bar. */
+.brand-text { display: inline-flex; flex-direction: column; line-height: 1.15; }
+.brand-name { font-weight: 700; font-size: 1.3125rem; }
+.brand-sub { font-weight: 500; font-size: 0.8rem; color: var(--text-muted); font-family: ui-monospace, monospace; }
+.brand-tag { font-weight: 500; font-size: 0.85rem; color: var(--text-muted); }
 .nav-links {
   list-style: none; padding: 0; margin: 0;
   display: flex; gap: 1.1rem; align-items: center;
@@ -255,6 +273,26 @@ input[type='text']:focus, select:focus { outline: none; border-color: var(--acce
 .leaflet-popup-content-wrapper, .leaflet-popup-tip {
   background: var(--bg-card); color: var(--text);
 }
+/* The self pin: a green dot ringed in white so "you" reads clearly
+   against the peer pins (default Leaflet blue markers). */
+.map-self-pin { background: none; border: none; }
+.map-self-dot {
+  display: block; width: 16px; height: 16px;
+  border-radius: 50%;
+  background: #2e7d32; border: 2px solid #fff;
+  box-shadow: 0 0 0 2px rgba(46, 125, 50, 0.4);
+}
+/* "Center on my node" button — floats over the map, themed like the
+   rest of the UI rather than Leaflet's default white box. */
+.map-center-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 2.4rem; height: 2.4rem; padding: 0;
+  background: var(--bg-card); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+}
+.map-center-btn:hover { border-color: var(--accent); color: var(--accent); }
 
 .debug-list {
   max-height: 60vh; overflow-y: auto;

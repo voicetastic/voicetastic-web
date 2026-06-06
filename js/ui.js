@@ -4,12 +4,66 @@
 
 import { state } from './state.js';
 
+// The most recent `setStatus` kind, so `updateBrand` (which also fires
+// on later node-info updates) can re-derive the header state without
+// the caller re-passing it.
+let currentStatusKind = null;
+
 /// Update the status pill in the nav. `kind` ∈ undefined | 'connecting'
 /// | 'ready' | 'error' — drives the colour via CSS classes.
 export function setStatus(text, kind) {
   const el = document.getElementById('status');
-  el.textContent = text;
-  el.className = 'status-pill' + (kind ? ' ' + kind : '');
+  if (el) {
+    el.textContent = text;
+    el.className = 'status-pill' + (kind ? ' ' + kind : '');
+  }
+  currentStatusKind = kind || null;
+  updateBrand();
+}
+
+/// Reflect connection state + self identity in the header brand,
+/// mirroring the Android top app bar: the logo gets a coloured ring
+/// (green when ready, amber + pulse while connecting, red when
+/// disconnected) and, once fully connected, the "Voicetastic / web"
+/// wordmark is replaced by our node's name and id. The long name
+/// arrives a beat after the id (via the self NodeInfo), so we fall back
+/// to the id-only view until it lands — matching the Android behaviour.
+export function updateBrand() {
+  const brand = document.getElementById('brand');
+  const textEl = document.getElementById('brand-text');
+  if (!brand || !textEl) return;
+
+  const ringClass = currentStatusKind === 'ready' ? 'is-connected'
+    : currentStatusKind === 'connecting' ? 'is-connecting'
+    : 'is-disconnected';
+  brand.classList.remove('is-connected', 'is-connecting', 'is-disconnected');
+  brand.classList.add(ringClass);
+
+  textEl.replaceChildren();
+  if (currentStatusKind === 'ready' && state.myNodeHex) {
+    const name = state.knownNodes.get(state.myNodeHex);
+    const longName = name && name !== state.myNodeHex ? name : null;
+    const primary = document.createElement('span');
+    primary.className = 'brand-name';
+    primary.textContent = longName || state.myNodeHex;
+    textEl.append(primary);
+    if (longName) {
+      const sub = document.createElement('span');
+      sub.className = 'brand-sub';
+      sub.textContent = state.myNodeHex;
+      textEl.append(sub);
+    }
+    brand.title = `Connected as ${longName || state.myNodeHex}`;
+  } else {
+    const nameEl = document.createElement('span');
+    nameEl.className = 'brand-name';
+    nameEl.textContent = 'Voicetastic';
+    const tag = document.createElement('span');
+    tag.className = 'brand-tag';
+    tag.textContent = 'web';
+    textEl.append(nameEl, tag);
+    brand.removeAttribute('title');
+  }
 }
 
 /// Append one line to the Connect-page event log, scrolling to the
@@ -78,4 +132,7 @@ export function updateInfoCard() {
     infoBody.append(line3);
   }
   infoCard.hidden = false;
+  // The self node's long name lands via NodeInfo after we're already
+  // 'ready'; refresh the header so it fills in the name once known.
+  updateBrand();
 }
