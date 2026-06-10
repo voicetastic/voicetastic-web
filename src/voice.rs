@@ -315,6 +315,13 @@ impl WebClient {
             cfg.nack_window = params.nack_window;
             cfg.nack_backoff_base = params.backoff_base;
             cfg.max_nack_rounds = params.max_nack_rounds;
+            // Tie the round cap to `message_timeout` so the timeout is the
+            // real ceiling, matching the GUI/CLI/Android hosts. An explicit
+            // `Off` (backoff_base == 0) keeps the preset's small cap so the
+            // state machine doesn't try to NACK at all.
+            if params.backoff_base != 0 {
+                cfg.sync_nack_cap_to_timeout();
+            }
         }) {
             log(&format!("nack mode rejected: {reason}"));
         }
