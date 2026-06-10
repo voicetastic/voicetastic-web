@@ -8,6 +8,9 @@
 import { state } from './state.js';
 
 let listEl, sourceEl, levelEl, countEl;
+// Length of state.debugLog at the last render, so the auto-refresh tick can
+// skip the (relatively expensive) re-render when nothing new has arrived.
+let lastRenderedLen = -1;
 
 export function initDebug() {
   listEl = document.getElementById('debug-list');
@@ -20,6 +23,16 @@ export function initDebug() {
   };
   sourceEl.onchange = renderDebug;
   levelEl.onchange = renderDebug;
+
+  // Auto-refresh while the Debug tab is visible. events.js appends to
+  // state.debugLog without re-rendering (to keep the main thread free), so
+  // poll once a second and re-render only when the tab is active and the log
+  // has actually grown. The length guard makes the idle tick nearly free.
+  setInterval(() => {
+    if (!location.hash.startsWith('#/debug')) return;
+    if (state.debugLog.length === lastRenderedLen) return;
+    renderDebug();
+  }, 1000);
 }
 
 export function renderDebug() {
@@ -46,11 +59,20 @@ export function renderDebug() {
     .filter((e) => !sourceFilter || e.source === sourceFilter)
     .filter((e) => !levelFilter || e.level === levelFilter);
 
+  // Mark this render so the auto-refresh tick can short-circuit until the
+  // log grows again. Set before the early return so an empty log counts too.
+  lastRenderedLen = state.debugLog.length;
+
   countEl.textContent = `${entries.length} of ${state.debugLog.length} entries`;
   if (entries.length === 0) {
     listEl.innerHTML = '<div class="placeholder muted">No events match the filter.</div>';
     return;
   }
+
+  // Stick to the bottom only if the user is already there; if they've
+  // scrolled up to read history, preserve their position across the refresh.
+  const atBottom = listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight < 40;
+  const prevScroll = listEl.scrollTop;
 
   const icon = (l) => l === 'error' ? '✗' : l === 'warn' ? '⚠' : '·';
   const fmt = (e) => {
@@ -61,5 +83,5 @@ export function renderDebug() {
   };
   // Newest at bottom (oldest first); the container scrolls.
   listEl.innerHTML = entries.map(fmt).join('');
-  listEl.scrollTop = listEl.scrollHeight;
+  listEl.scrollTop = atBottom ? listEl.scrollHeight : prevScroll;
 }
