@@ -124,7 +124,6 @@ const SECTIONS = [
     { name: 'password', label: 'Password', type: 'text' },
     { name: 'root', label: 'Root topic', type: 'text' },
     { name: 'encryption_enabled', label: 'Send encrypted packets', type: 'bool' },
-    { name: 'json_enabled', label: 'JSON packets', type: 'bool' },
     { name: 'tls_enabled', label: 'Use TLS', type: 'bool' },
     { name: 'proxy_to_client_enabled', label: 'Proxy through client', type: 'bool' },
     { name: 'map_reporting_enabled', label: 'Report node to public map', type: 'bool' },

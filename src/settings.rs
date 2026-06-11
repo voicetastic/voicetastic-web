@@ -136,7 +136,6 @@ pub(crate) struct MqttDto {
     pub password: String,
     pub root: String,
     pub encryption_enabled: bool,
-    pub json_enabled: bool,
     pub tls_enabled: bool,
     pub proxy_to_client_enabled: bool,
     pub map_reporting_enabled: bool,
@@ -330,6 +329,8 @@ fn bluetooth_to_dto(c: &config::BluetoothConfig) -> BluetoothDto {
 
 fn mqtt_to_dto(c: &module_config::MqttConfig) -> MqttDto {
     let map = c.map_report_settings.as_ref();
+    // `json_enabled` is intentionally dropped: it's deprecated upstream
+    // (MQTT JSON output was removed and the field is ignored by firmware).
     MqttDto {
         enabled: c.enabled,
         address: c.address.clone(),
@@ -337,7 +338,6 @@ fn mqtt_to_dto(c: &module_config::MqttConfig) -> MqttDto {
         password: c.password.clone(),
         root: c.root.clone(),
         encryption_enabled: c.encryption_enabled,
-        json_enabled: c.json_enabled,
         tls_enabled: c.tls_enabled,
         proxy_to_client_enabled: c.proxy_to_client_enabled,
         map_reporting_enabled: c.map_reporting_enabled,
@@ -528,9 +528,11 @@ pub(crate) fn bluetooth_payload(
 }
 
 pub(crate) fn mqtt_payload(_state: &ProtocolState, dto: MqttDto) -> admin_message::PayloadVariant {
-    // The DTO carries every field MqttConfig has, so we don't overlay
-    // from the current snapshot (unlike the `Config` writers where the
-    // UI exposes a subset).
+    // The DTO carries every MqttConfig field the firmware honours, so we
+    // don't overlay from the current snapshot (unlike the `Config` writers
+    // where the UI exposes a subset). The deprecated, firmware-ignored
+    // `json_enabled` field is left at its default via `..Default::default()`
+    // rather than named.
     let map = module_config::MapReportSettings {
         publish_interval_secs: dto.map_publish_interval_secs,
         position_precision: dto.map_position_precision,
@@ -543,11 +545,11 @@ pub(crate) fn mqtt_payload(_state: &ProtocolState, dto: MqttDto) -> admin_messag
         password: dto.password,
         root: dto.root,
         encryption_enabled: dto.encryption_enabled,
-        json_enabled: dto.json_enabled,
         tls_enabled: dto.tls_enabled,
         proxy_to_client_enabled: dto.proxy_to_client_enabled,
         map_reporting_enabled: dto.map_reporting_enabled,
         map_report_settings: if dto.map_reporting_enabled { Some(map) } else { None },
+        ..Default::default()
     };
     admin_message::PayloadVariant::SetModuleConfig(ModuleConfig {
         payload_variant: Some(module_config::PayloadVariant::Mqtt(updated)),

@@ -924,6 +924,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
+name = "pkg-config"
+version = "0.3.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
+
+[[package]]
 name = "prettyplease"
 version = "0.2.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1512,7 +1518,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "voicetastic-core"
 version = "0.0.0-git"
-source = "git+https://github.com/voicetastic/voicetastic-core.git?rev=75a6fa7dd058b60e01506b718442412cc898e3bb#75a6fa7dd058b60e01506b718442412cc898e3bb"
+source = "git+https://github.com/voicetastic/voicetastic-core.git?branch=main#44142c87f6ebffb4f8dbb4f372c48907ac2fa230"
 dependencies = [
  "aes",
  "async-trait",
@@ -1528,6 +1534,7 @@ dependencies = [
  "nnnoiseless",
  "opencore-amrnb",
  "parking_lot 0.12.5",
+ "pkg-config",
  "prost",
  "prost-build",
  "reed-solomon-erasure",

@@ -960,6 +960,9 @@ fn process_payload(
             my_node_num: state.my_info.as_ref().map(|i| i.my_node_num),
             our_private_key: None,
             nodes: &state.nodes,
+            // PKC DM decrypt isn't wired in the browser (private key is
+            // `None`), so there's no rescued-DM stream to replay-dedup.
+            pkc_seen: None,
         };
         protocol::decode_inbound(payload, &ctx)
     };

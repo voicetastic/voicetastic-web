@@ -2,6 +2,8 @@
 /pkg
 Cargo.lock.bak
 **/*.rs.bk
+# rustc internal-compiler-error crash dumps
+rustc-ice-*.txt
 .DS_Store
 node_modules/
 # Track .cargo/config.toml (build cfg) but nothing else under .cargo/.
