@@ -328,6 +328,10 @@ fn bluetooth_to_dto(c: &config::BluetoothConfig) -> BluetoothDto {
     }
 }
 
+// `json_enabled` is deprecated upstream (MQTT JSON output is being phased
+// out) but still present on the wire; we mirror it for round-trip fidelity
+// with firmware that still exposes it.
+#[allow(deprecated)]
 fn mqtt_to_dto(c: &module_config::MqttConfig) -> MqttDto {
     let map = c.map_report_settings.as_ref();
     MqttDto {
@@ -527,6 +531,8 @@ pub(crate) fn bluetooth_payload(
     })
 }
 
+// See `mqtt_to_dto`: deprecated `json_enabled` is mirrored on purpose.
+#[allow(deprecated)]
 pub(crate) fn mqtt_payload(_state: &ProtocolState, dto: MqttDto) -> admin_message::PayloadVariant {
     // The DTO carries every field MqttConfig has, so we don't overlay
     // from the current snapshot (unlike the `Config` writers where the
